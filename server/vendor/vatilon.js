@@ -27,12 +27,15 @@ function originFor(host, port) {
   return `http://${bracketed}:${port ?? 80}`;
 }
 
+/**
+ * NOT unref'd. This waits between a write and its read-back, so it is part of an
+ * in-flight request rather than a background timer — unref'ing it lets Node exit
+ * mid-write and silently abandon the confirmation the caller is awaiting.
+ * (The abort timer in fetchTimed IS unref'd; the fetch holds the loop open.)
+ */
 function delay(ms) {
   if (ms <= 0) return Promise.resolve();
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    timer.unref?.();
-  });
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
 }
 
 function deviceError(message, hint = null) {
