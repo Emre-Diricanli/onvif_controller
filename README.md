@@ -53,6 +53,21 @@ Environment switches for testing failure paths:
 | --- | --- |
 | `MOCK_REJECT_AUTH=1` | Every authenticated call returns 401 |
 | `MOCK_SKEW_SECONDS=600` | Device clock reports 10 minutes behind |
+| `MOCK_IMAGING_MODE=ignore` | Imaging writes report success but change nothing |
+| `MOCK_IMAGING_MODE=clamp` | Device clamps brightness to a lower maximum |
+
+`MOCK_IMAGING_MODE=ignore` reproduces the real Hikvision behaviour where a
+brightness change appears to succeed and the picture never changes.
+
+### Debugging a camera that won't apply a setting
+
+```
+DEBUG_ONVIF=1 npm start
+```
+
+Logs the outgoing SetImagingSettings SOAP body and the device's raw response, so
+you can see exactly what the camera was asked and what it said back. Credentials
+and RTSP URLs are never logged.
 
 The mock has no RTSP source, so live video will not play against it — use it for
 the control surface, capability probing, and error paths.

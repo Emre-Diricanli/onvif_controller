@@ -232,7 +232,29 @@ what is present, and slider bounds come from `options` — never hardcoded.
 { "profile": "Profile_1", "settings": { "brightness": 60, "irCutFilter": "ON" } }
 ```
 Partial update; only supplied keys change.
-→ the same shape as `GET`, reflecting the device's post-write state.
+→ the same shape as `GET`, reflecting the device's post-write state, plus an
+`applied` object reporting whether each patched field actually took:
+
+```json
+{
+  "settings": { "brightness": 255, "...": "..." },
+  "options":  { "...": "..." },
+  "applied":  { "brightness": true }
+}
+```
+
+`applied[field]` is `false` when the device still reports the previous value
+after the write and a short confirmation poll. This is not hypothetical: some
+Hikvision firmware answers SetImagingSettings with success and silently keeps
+the old value. Clamping is *not* a failure — a device that accepts 200 when 255
+was requested reports `applied: true` and `settings.brightness: 200`, and the UI
+shows the device's real value.
+
+Note that ONVIF `SetImagingSettings` **replaces** the imaging settings
+structure. The server always sends the complete merged block (current settings
+overlaid with the patch), restricted to fields the device itself reported —
+sending only the changed field makes most Hikvision firmware ignore the write
+entirely.
 
 ### `POST /api/session/:id/imaging/focus`
 ```json
