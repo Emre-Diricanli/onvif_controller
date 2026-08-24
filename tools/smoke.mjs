@@ -9,6 +9,7 @@
  */
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
+import WsClient from 'ws';
 
 const MOCK_PORT = 10199;
 const APP_PORT = 8099;
@@ -179,6 +180,58 @@ async function main() {
   check('device info present', Boolean(deviceBody.info));
   check('device time block present', Boolean(deviceBody.time));
   check('relay outputs is an array', Array.isArray(deviceBody.relayOutputs));
+
+
+  console.log('\nWebSockets');
+  // The REST surface passing tells you nothing about the sockets: both were
+  // green here while every /ws/events connection was dying on a TDZ error.
+  const wsBase = `ws://127.0.0.1:${APP_PORT}`;
+
+  async function openSocket(url, { origin, waitMs = 3000 } = {}) {
+    return new Promise((resolve) => {
+      const frames = [];
+      let ws;
+      try {
+        // The `ws` client, not the global WebSocket: only this one can set a
+        // custom Origin header, which the cross-origin check below depends on.
+        ws = new WsClient(url, origin ? { headers: { Origin: origin } } : undefined);
+      } catch (err) {
+        resolve({ error: String(err), frames, closeCode: null });
+        return;
+      }
+      const done = (closeCode) => resolve({ frames, closeCode, error: null });
+      const timer = setTimeout(() => { try { ws.close(); } catch {} done(null); }, waitMs);
+      ws.on('message', (data, isBinary) => {
+        if (isBinary) frames.push({ binary: true });
+        else { try { frames.push(JSON.parse(String(data))); } catch { frames.push({ raw: true }); } }
+      });
+      ws.on('close', (code) => { clearTimeout(timer); done(code); });
+      ws.on('unexpected-response', (_req, res) => { clearTimeout(timer); resolve({ frames, closeCode: null, error: `HTTP ${res.statusCode}` }); });
+      ws.on('error', () => {});
+    });
+  }
+
+  const eventsSock = await openSocket(`${wsBase}/ws/events?session=${id}`, { waitMs: 2500 });
+  const eventTypes = eventsSock.frames.map((f) => f.type);
+  check('events socket stays open', eventsSock.closeCode === null || eventsSock.closeCode === 1000,
+    `closed with ${eventsSock.closeCode}`);
+  check('events socket does not error out', !eventTypes.includes('error'),
+    JSON.stringify(eventsSock.frames.slice(0, 2)));
+
+  const badStream = await openSocket(`${wsBase}/ws/stream?session=${id}&stream=nope`, { waitMs: 1500 });
+  check('stream socket rejects an unknown stream', badStream.closeCode === 4002,
+    `closed with ${badStream.closeCode}`);
+
+  const badSession = await openSocket(`${wsBase}/ws/events?session=00000000-0000-0000-0000-000000000000`, { waitMs: 1500 });
+  check('events socket rejects an unknown session', badSession.closeCode === 4001,
+    `closed with ${badSession.closeCode}`);
+
+  const crossOrigin = await openSocket(`${wsBase}/ws/events?session=${id}`, { origin: 'http://evil.example', waitMs: 1500 });
+  check('cross-origin upgrade is refused', crossOrigin.closeCode !== null || crossOrigin.error !== null,
+    'a hostile page must not be able to open a control socket');
+
+  const crossOriginApi = await fetch(`${BASE}/api/session/${id}`, { headers: { Origin: 'http://evil.example' } });
+  check('cross-origin API request is refused', crossOriginApi.status === 400, `got ${crossOriginApi.status}`);
 
   console.log('\nStatic assets');
   for (const asset of ['/', '/js/app.js', '/js/player.js', '/js/spring.js', '/styles/tokens.css', '/styles/app.css', '/styles/player.css']) {

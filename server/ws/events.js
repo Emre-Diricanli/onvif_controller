@@ -31,14 +31,19 @@ export function handleEventsSocket(ws, url) {
 
   // The client pings every 25s. If nothing arrives for well over that, the
   // socket is half-open and holding an event listener; drop it.
-  let idleTimer = resetIdle();
+  //
+  // Declared before first use: calling resetIdle() in the initializer of
+  // `idleTimer` would read `idleTimer` while it is still in the temporal dead
+  // zone, throwing on every single events connection.
+  let idleTimer = null;
   function resetIdle() {
     clearTimeout(idleTimer);
-    return setTimeout(() => ws.close(4008, 'Idle'), PING_TIMEOUT_MS);
+    idleTimer = setTimeout(() => ws.close(4008, 'Idle'), PING_TIMEOUT_MS);
   }
+  resetIdle();
 
   ws.on('message', (raw) => {
-    idleTimer = resetIdle();
+    resetIdle();
     let msg;
     try { msg = JSON.parse(String(raw)); } catch { return; }
     if (msg?.type === 'ping') {
