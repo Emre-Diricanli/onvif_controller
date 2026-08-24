@@ -65,8 +65,23 @@ node tools/smoke.mjs          # add VERBOSE=1 to see server output
 
 Boots the mock device and the app on scratch ports and asserts the API contract
 plus the Definition of Done items from `SPEC.md`: error envelopes, credential
-non-leakage, capability-driven behavior, and that no ffmpeg processes are left
-behind.
+non-leakage, capability-driven behavior, the PTZ safety layers, both
+WebSockets, same-origin rejection, and that no ffmpeg processes are left behind.
+
+The mock has no RTSP source, so the video path is exercised through
+`tools/fake-ffmpeg.mjs` instead — a shim that the pipeline resolves via
+`FFMPEG_PATH`. It swaps only the `-i <rtsp url>` input for a synthetic test
+pattern and passes every other argument the pipeline chose straight through, so
+the fragmented-MP4 box parser, the codec-string extraction, the WebSocket
+framing and the process teardown are all genuinely under test. Only the RTSP
+negotiation itself is not.
+
+To run the suite against your real ffmpeg (video assertions will fail without a
+camera, everything else still runs):
+
+```
+SMOKE_REAL_FFMPEG=1 node tools/smoke.mjs
+```
 
 ## Documents
 
