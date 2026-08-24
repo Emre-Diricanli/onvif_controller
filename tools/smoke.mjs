@@ -224,6 +224,72 @@ async function main() {
   check('device time block present', Boolean(deviceBody.time));
   check('relay outputs is an array', Array.isArray(deviceBody.relayOutputs));
 
+  console.log('\nNetwork configuration');
+  const networkUrl = `${BASE}/api/session/${id}/device/network`;
+  const networkRead = await fetch(networkUrl);
+  const networkBody = await networkRead.json();
+  check('network read returns 200', networkRead.status === 200, JSON.stringify(networkBody).slice(0, 200));
+  check('network read returns hostname', typeof networkBody.hostname === 'string', JSON.stringify(networkBody));
+  check('network read returns interfaces', Array.isArray(networkBody.interfaces) && networkBody.interfaces.length > 0, JSON.stringify(networkBody));
+  check('network read returns DNS and NTP lists', Array.isArray(networkBody.dns) && Array.isArray(networkBody.ntp));
+
+  const hostnameWrite = await fetch(networkUrl, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ settings: { hostname: 'camera-loading-dock' } }),
+  });
+  const hostnameBody = await hostnameWrite.json();
+  check('hostname write returns 200', hostnameWrite.status === 200, JSON.stringify(hostnameBody));
+  check('hostname write is verified applied', hostnameBody.applied?.hostname === true, JSON.stringify(hostnameBody));
+  check('hostname response contains read-back value', hostnameBody.hostname === 'camera-loading-dock', JSON.stringify(hostnameBody));
+
+  const dnsWrite = await fetch(networkUrl, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ settings: { dns: ['1.1.1.1', '9.9.9.9'] } }),
+  });
+  const dnsBody = await dnsWrite.json();
+  check('DNS write returns 200', dnsWrite.status === 200, JSON.stringify(dnsBody));
+  check('DNS write is verified applied', dnsBody.applied?.dns === true, JSON.stringify(dnsBody));
+  check('DNS response contains read-back list', JSON.stringify(dnsBody.dns) === JSON.stringify(['1.1.1.1', '9.9.9.9']), JSON.stringify(dnsBody));
+
+  for (const [label, settings] of [
+    ['malformed IPv4', { ipv4: '999.4.3.2' }],
+    ['out-of-range prefix', { prefix: 33 }],
+  ]) {
+    const invalid = await fetch(networkUrl, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings }),
+    });
+    const invalidBody = await invalid.json();
+    check(`${label} is rejected with BAD_REQUEST`, invalid.status === 400 && invalidBody.error?.code === 'BAD_REQUEST', JSON.stringify(invalidBody));
+  }
+
+  const ignorePort = MOCK_PORT + 4;
+  start('mock-network-ignore', ['tools/mock-camera.js', String(ignorePort)], { MOCK_NETWORK_MODE: 'ignore' });
+  await delay(500);
+  const ignoredConnect = await fetch(`${BASE}/api/connect`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ host: '127.0.0.1', port: ignorePort, username: 'admin', password: 'admin' }),
+  });
+  const ignoredSession = await ignoredConnect.json();
+  check('ignore-mode network camera connects', ignoredConnect.status === 200, JSON.stringify(ignoredSession).slice(0, 180));
+  const ignoredWrite = await fetch(`${BASE}/api/session/${ignoredSession.sessionId}/device/network`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ settings: { hostname: 'camera-ignored-write' } }),
+  });
+  const ignoredBody = await ignoredWrite.json();
+  check('ignored network write still returns camera response', ignoredWrite.status === 200, JSON.stringify(ignoredBody));
+  check('ignored network write reports applied false', ignoredBody.applied?.hostname === false, JSON.stringify(ignoredBody));
+  check('ignored network write preserves reported value', ignoredBody.hostname !== 'camera-ignored-write', JSON.stringify(ignoredBody));
+
+  const relocation = await fetch(networkUrl, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ settings: { dhcp: false, ipv4: '192.168.100.50', prefix: 24 } }),
+  });
+  const relocationBody = await relocation.json();
+  check('address-affecting write returns 200', relocation.status === 200, JSON.stringify(relocationBody));
+  check('address-affecting write is flagged as relocation', relocationBody.relocation?.expected === true, JSON.stringify(relocationBody));
+  check('relocation response includes expected address', relocationBody.relocation?.address === '192.168.100.50', JSON.stringify(relocationBody));
+
 
 
   console.log('\nPTZ safety (server-side dead-man watchdog)');
