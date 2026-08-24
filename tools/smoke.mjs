@@ -10,6 +10,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import WsClient from 'ws';
+import path from 'node:path';
 
 const MOCK_PORT = 10199;
 const APP_PORT = 8099;
@@ -63,7 +64,12 @@ process.on('SIGINT', () => { cleanup(); process.exit(130); });
 async function main() {
   console.log('Starting mock camera and app server...');
   start('mock', ['tools/mock-camera.js', String(MOCK_PORT)]);
-  start('app', ['server/index.js'], { PORT: String(APP_PORT), HOST: '127.0.0.1' });
+  start('app', ['server/index.js'], {
+    PORT: String(APP_PORT),
+    HOST: '127.0.0.1',
+    // Exercise the real pipeline against a synthetic source. See tools/fake-ffmpeg.mjs.
+    FFMPEG_PATH: process.env.SMOKE_REAL_FFMPEG ? undefined : path.resolve('tools/fake-ffmpeg.mjs'),
+  });
 
   if (!await waitForPort(`${BASE}/api/health`)) {
     console.error('Server did not come up. Run with VERBOSE=1 to see why.');
@@ -275,6 +281,49 @@ async function main() {
 
   const crossOriginApi = await fetch(`${BASE}/api/session/${id}`, { headers: { Origin: 'http://evil.example' } });
   check('cross-origin API request is refused', crossOriginApi.status === 400, `got ${crossOriginApi.status}`);
+
+
+  console.log('\nLive stream pipeline (synthetic source via the ffmpeg shim)');
+  let streamId = null;
+  {
+    const startRes = await fetch(`${BASE}/api/session/${id}/stream/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile }),
+    });
+    const info = await startRes.json();
+    check('stream/start returns 200', startRes.status === 200, JSON.stringify(info).slice(0, 250));
+    check('stream/start returns a streamId', typeof info.streamId === 'string', JSON.stringify(info).slice(0, 150));
+    check('stream/start returns an MSE mime type', /^video\/mp4; codecs=/.test(info.mime ?? ''), String(info.mime));
+    check('mime carries a real avc1 codec string', /avc1\.[0-9a-fA-F]{6}/.test(info.mime ?? ''), String(info.mime));
+    streamId = info.streamId;
+
+    if (streamId) {
+      const sock = await openSocket(`${wsBase}/ws/stream?session=${id}&stream=${streamId}`, { waitMs: 4000 });
+      const text = sock.frames.filter((f) => !f.binary);
+      const binary = sock.frames.filter((f) => f.binary);
+      check('stream socket sends a ready frame first',
+        text[0]?.type === 'ready', JSON.stringify(text.slice(0, 2)));
+      check('stream socket delivers an init segment', binary.length >= 1, `${binary.length} binary frames`);
+      check('stream socket delivers media fragments', binary.length >= 3,
+        `only ${binary.length} binary frames — the box parser may not be emitting moof/mdat pairs`);
+      check('stream socket reports no error', !text.some((f) => f.type === 'error'),
+        JSON.stringify(text.filter((f) => f.type === 'error').slice(0, 1)));
+
+      const stopRes = await fetch(`${BASE}/api/session/${id}/stream/stop`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ streamId }),
+      });
+      check('stream/stop returns 204', stopRes.status === 204, `got ${stopRes.status}`);
+      await delay(1200);
+      let alive = '';
+      try {
+        const { execSync } = await import('node:child_process');
+        alive = execSync('pgrep -fl "fake-ffmpeg|ffmpeg.*movflags" || true', { encoding: 'utf8' }).trim();
+      } catch { /* nothing matched */ }
+      check('stopping the stream kills its ffmpeg', alive === '', alive.slice(0, 200));
+    }
+  }
 
   console.log('\nStatic assets');
   for (const asset of ['/', '/js/app.js', '/js/player.js', '/js/spring.js', '/styles/tokens.css', '/styles/app.css', '/styles/player.css']) {
