@@ -11,8 +11,23 @@
 import { api, ApiError } from '../api.js';
 import { spring, rubberband, prefersReducedMotion } from '../spring.js';
 import { draggable, pressable } from '../gesture.js';
+import { onPageInactive } from '../player.js';
 
 const MOVE_INTERVAL_MS = 100;
+
+// Arrow keys drive the pad; these and +/- drive the rocker. Keyboard release
+// carries no pointer velocity, so keyboard returns are critically damped —
+// bounce is reserved for momentum gestures (SPEC.md §6).
+const PAD_KEY_DIRS = {
+  ArrowLeft: [-1, 0],
+  ArrowRight: [1, 0],
+  ArrowUp: [0, 1],
+  ArrowDown: [0, -1],
+};
+const ROCKER_KEY_DIRS = {
+  '+': 1, '=': 1, '-': -1, '_': -1,
+  ArrowUp: 1, ArrowDown: -1,
+};
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -81,10 +96,64 @@ export function renderJoystick(container, { sessionId, profile, ptz, onError }) 
     api.ptzStop(sessionId, profile, { panTilt, zoom }).catch(reportError);
   }
 
+  // --- Page-inactivity safety watch ---
+  //
+  // If the operator backgrounds the tab, locks the screen, or the machine
+  // sleeps while the pad or rocker is held (pointer OR keyboard), the
+  // pointerup/keyup may never fire and the camera keeps driving until it hits
+  // a mechanical limit. While any hold is active we subscribe to the player's
+  // page-inactivity signal; when it fires we stop EVERY axis, cancel any
+  // in-flight move, and reset both controls to centre. A camera left panning
+  // is worse than any visual glitch — this path must be bulletproof.
+  let unsubscribeInactive = null;
+  let focusHolds = 0;
+  const padKeys = new Set();
+  const rockerKeys = new Set();
+
+  function anyHoldActive() {
+    return holding || rockerHolding || focusHolds > 0 || padKeys.size > 0 || rockerKeys.size > 0;
+  }
+
+  function updateSafetyWatch() {
+    if (destroyed) return;
+    if (anyHoldActive() && !unsubscribeInactive) {
+      unsubscribeInactive = onPageInactive(handlePageInactive);
+    } else if (!anyHoldActive() && unsubscribeInactive) {
+      unsubscribeInactive();
+      unsubscribeInactive = null;
+    }
+  }
+
+  function handlePageInactive() {
+    if (unsubscribeInactive) { unsubscribeInactive(); unsubscribeInactive = null; }
+    if (trailingTimer) { clearTimeout(trailingTimer); trailingTimer = null; }
+    holding = false;
+    rockerHolding = false;
+    padKeys.clear();
+    rockerKeys.clear();
+    pad.classList.remove('ptz-pad-active');
+    rocker.classList.remove('zoom-rocker-active');
+    stopReturnSprings();
+    if (rockerSpring) { rockerSpring.stop(); rockerSpring = null; }
+    vector.pan = 0; vector.tilt = 0; vector.zoom = 0;
+    knobPos.x = 0; knobPos.y = 0; renderKnob();
+    setRockerSilent(0);
+    updateAria();
+    if (focusHolds > 0) {
+      focusHolds = 0;
+      api.focus(sessionId, profile, 'stop').catch(() => {});
+    }
+    if (destroyed) return;
+    api.ptzStop(sessionId, profile, { panTilt: true, zoom: true }).catch(reportError);
+  }
+
   // --- Pad ---
   const pad = el('div', 'ptz-pad');
   pad.setAttribute('role', 'slider');
-  pad.setAttribute('aria-label', 'Pan and tilt');
+  pad.setAttribute('aria-label', 'Pan and tilt. Hold the arrow keys to move.');
+  pad.setAttribute('aria-valuemin', '-100');
+  pad.setAttribute('aria-valuemax', '100');
+  pad.tabIndex = 0;
   const knob = el('div', 'ptz-knob');
   pad.appendChild(knob);
 
@@ -92,6 +161,13 @@ export function renderJoystick(container, { sessionId, profile, ptz, onError }) 
   let returnSpringX = null;
   let returnSpringY = null;
   let holding = false;
+
+  function updateAria() {
+    const mag = Math.round(Math.min(1, Math.hypot(vector.pan, vector.tilt)) * 100);
+    pad.setAttribute('aria-valuenow', String(mag));
+    pad.setAttribute('aria-valuetext', `pan ${vector.pan.toFixed(2)}, tilt ${vector.tilt.toFixed(2)}`);
+    rocker.setAttribute('aria-valuenow', String(Math.round(rockerValue * 100)));
+  }
 
   function padRadius() {
     return pad.clientWidth / 2;
@@ -126,6 +202,7 @@ export function renderJoystick(container, { sessionId, profile, ptz, onError }) 
     const Rn = R || 1;
     vector.pan = clamp(x / Rn, -1, 1);
     vector.tilt = clamp(-y / Rn, -1, 1);
+    updateAria();
     scheduleMove();
   }
 
@@ -135,6 +212,7 @@ export function renderJoystick(container, { sessionId, profile, ptz, onError }) 
       moveFailed = false;
       stopReturnSprings();
       pad.classList.add('ptz-pad-active');
+      updateSafetyWatch();
     },
     onMove({ dx, dy }) {
       // 1:1 tracking of pointer deltas — the knob never snaps to the pointer.
@@ -144,42 +222,137 @@ export function renderJoystick(container, { sessionId, profile, ptz, onError }) 
       holding = false;
       pad.classList.remove('ptz-pad-active');
       stopAxes({ panTilt: true, zoom: false });
-      // Spring home, carrying the release velocity through. Bounce (0.8) is
-      // allowed here: this is a momentum gesture.
-      const damping = prefersReducedMotion() ? 1.0 : 0.8;
-      const R = travelRadius();
-      if (!committed) {
+      updateSafetyWatch();
+      if (!committed || prefersReducedMotion()) {
+        // Reduced motion: no spring travel — the knob snaps home.
         knobPos.x = 0; knobPos.y = 0; renderKnob();
+        updateAria();
         return;
       }
+      // Spring home, carrying the release velocity through. Bounce (0.8) is
+      // allowed here: this is a momentum gesture.
+      const R = travelRadius();
       returnSpringX = spring({
         from: knobPos.x, to: 0, velocity: clamp(velocity.x, -R * 8, R * 8),
-        damping, response: 0.4,
+        damping: 0.8, response: 0.4,
         onUpdate: (v) => { knobPos.x = v; renderKnob(); },
-        onComplete: () => { returnSpringX = null; },
+        onComplete: () => { returnSpringX = null; updateAria(); },
       });
       returnSpringY = spring({
         from: knobPos.y, to: 0, velocity: clamp(velocity.y, -R * 8, R * 8),
-        damping, response: 0.4,
+        damping: 0.8, response: 0.4,
         onUpdate: (v) => { knobPos.y = v; renderKnob(); },
-        onComplete: () => { returnSpringY = null; },
+        onComplete: () => { returnSpringY = null; updateAria(); },
       });
     },
     onCancel() {
       holding = false;
       pad.classList.remove('ptz-pad-active');
       stopAxes({ panTilt: true, zoom: false });
+      updateSafetyWatch();
       stopReturnSprings();
       knobPos.x = 0; knobPos.y = 0; renderKnob();
+      updateAria();
     },
   }));
+
+  // Arrow keys: hold to move, release to stop. Each keydown adds a direction,
+  // keyup removes it; when the last key lifts the camera is told to stop and
+  // the knob returns critically damped (a key release carries no velocity).
+  function applyPadKeys() {
+    let vx = 0;
+    let vy = 0;
+    for (const key of padKeys) {
+      vx += PAD_KEY_DIRS[key][0];
+      vy += PAD_KEY_DIRS[key][1];
+    }
+    const len = Math.hypot(vx, vy);
+    if (len > 1) { vx /= len; vy /= len; }
+    const R = travelRadius();
+    knobPos.x = vx * R * 0.8;
+    knobPos.y = -vy * R * 0.8;
+    renderKnob();
+    vector.pan = vx;
+    vector.tilt = vy;
+    updateAria();
+    scheduleMove();
+  }
+
+  function releasePadKeys() {
+    stopAxes({ panTilt: true, zoom: false });
+    if (prefersReducedMotion()) {
+      knobPos.x = 0; knobPos.y = 0; renderKnob();
+      updateAria();
+      return;
+    }
+    stopReturnSprings();
+    returnSpringX = spring({
+      from: knobPos.x, to: 0, velocity: 0, damping: 1.0, response: 0.3,
+      onUpdate: (v) => { knobPos.x = v; renderKnob(); },
+      onComplete: () => { returnSpringX = null; updateAria(); },
+    });
+    returnSpringY = spring({
+      from: knobPos.y, to: 0, velocity: 0, damping: 1.0, response: 0.3,
+      onUpdate: (v) => { knobPos.y = v; renderKnob(); },
+      onComplete: () => { returnSpringY = null; updateAria(); },
+    });
+  }
+
+  function onPadKeyDown(e) {
+    if (!PAD_KEY_DIRS[e.key]) return;
+    e.preventDefault();
+    if (e.repeat || padKeys.has(e.key)) return;
+    padKeys.add(e.key);
+    if (padKeys.size === 1) {
+      moveFailed = false;
+      stopReturnSprings();
+      pad.classList.add('ptz-pad-active');
+    }
+    updateSafetyWatch();
+    applyPadKeys();
+  }
+
+  function onPadKeyUp(e) {
+    if (!PAD_KEY_DIRS[e.key] || !padKeys.has(e.key)) return;
+    e.preventDefault();
+    padKeys.delete(e.key);
+    if (padKeys.size > 0) {
+      applyPadKeys();
+    } else {
+      pad.classList.remove('ptz-pad-active');
+      releasePadKeys();
+      updateSafetyWatch();
+    }
+  }
+
+  function onPadBlur() {
+    // Focus lost mid-hold (e.g. Cmd-Tab) — keyup may never arrive. Stop.
+    if (padKeys.size === 0) return;
+    padKeys.clear();
+    pad.classList.remove('ptz-pad-active');
+    releasePadKeys();
+    updateSafetyWatch();
+  }
+
+  pad.addEventListener('keydown', onPadKeyDown);
+  pad.addEventListener('keyup', onPadKeyUp);
+  pad.addEventListener('blur', onPadBlur);
+  cleanups.push(() => {
+    pad.removeEventListener('keydown', onPadKeyDown);
+    pad.removeEventListener('keyup', onPadKeyUp);
+    pad.removeEventListener('blur', onPadBlur);
+  });
 
   wrap.appendChild(pad);
 
   // --- Zoom rocker ---
   const rocker = el('div', 'zoom-rocker');
   rocker.setAttribute('role', 'slider');
-  rocker.setAttribute('aria-label', 'Zoom');
+  rocker.setAttribute('aria-label', 'Zoom. Hold + or −, or the up and down arrow keys.');
+  rocker.setAttribute('aria-orientation', 'vertical');
+  rocker.setAttribute('aria-valuemin', '-100');
+  rocker.setAttribute('aria-valuemax', '100');
+  rocker.tabIndex = 0;
   rocker.append(el('span', 'zoom-label', '+'));
   const rockerThumb = el('div', 'zoom-thumb');
   rocker.appendChild(rockerThumb);
@@ -202,6 +375,7 @@ export function renderJoystick(container, { sessionId, profile, ptz, onError }) 
     rockerValue = clamp(v, -1, 1);
     renderRocker();
     vector.zoom = rockerValue;
+    updateAria();
     scheduleMove();
   }
 
@@ -213,6 +387,7 @@ export function renderJoystick(container, { sessionId, profile, ptz, onError }) 
       moveFailed = false;
       if (rockerSpring) { rockerSpring.stop(); rockerSpring = null; }
       rocker.classList.add('zoom-rocker-active');
+      updateSafetyWatch();
     },
     onMove({ dy }) {
       const travel = rockerTravel() || 1;
@@ -226,22 +401,26 @@ export function renderJoystick(container, { sessionId, profile, ptz, onError }) 
       rockerHolding = false;
       rocker.classList.remove('zoom-rocker-active');
       stopAxes({ panTilt: false, zoom: true });
+      updateSafetyWatch();
       if (prefersReducedMotion()) {
-        setRocker(0);
+        setRockerSilent(0);
+        updateAria();
         return;
       }
       rockerSpring = spring({
         from: rockerValue, to: 0, velocity: clamp(-velocity.y / (rockerTravel() || 1), -8, 8),
         damping: 0.8, response: 0.35,
-        onUpdate: setRockerSilent,
-        onComplete: () => { rockerSpring = null; },
+        onUpdate: (v) => { setRockerSilent(v); updateAria(); },
+        onComplete: () => { rockerSpring = null; updateAria(); },
       });
     },
     onCancel() {
       rockerHolding = false;
       rocker.classList.remove('zoom-rocker-active');
       stopAxes({ panTilt: false, zoom: true });
-      setRocker(0);
+      updateSafetyWatch();
+      setRockerSilent(0);
+      updateAria();
     },
   }));
 
@@ -251,6 +430,73 @@ export function renderJoystick(container, { sessionId, profile, ptz, onError }) 
     rockerValue = v;
     renderRocker();
   }
+
+  // +/− and up/down arrows: hold to zoom, release to stop. Critically damped
+  // return — a key release carries no pointer velocity.
+  function applyRockerKeys() {
+    let v = 0;
+    for (const key of rockerKeys) v += ROCKER_KEY_DIRS[key];
+    setRocker(v);
+  }
+
+  function releaseRockerKeys() {
+    stopAxes({ panTilt: false, zoom: true });
+    if (rockerSpring) { rockerSpring.stop(); rockerSpring = null; }
+    if (prefersReducedMotion()) {
+      setRockerSilent(0);
+      updateAria();
+      return;
+    }
+    rockerSpring = spring({
+      from: rockerValue, to: 0, velocity: 0, damping: 1.0, response: 0.3,
+      onUpdate: (v) => { setRockerSilent(v); updateAria(); },
+      onComplete: () => { rockerSpring = null; updateAria(); },
+    });
+  }
+
+  function onRockerKeyDown(e) {
+    if (!ROCKER_KEY_DIRS[e.key]) return;
+    e.preventDefault();
+    if (e.repeat || rockerKeys.has(e.key)) return;
+    rockerKeys.add(e.key);
+    if (rockerKeys.size === 1) {
+      moveFailed = false;
+      if (rockerSpring) { rockerSpring.stop(); rockerSpring = null; }
+      rocker.classList.add('zoom-rocker-active');
+    }
+    updateSafetyWatch();
+    applyRockerKeys();
+  }
+
+  function onRockerKeyUp(e) {
+    if (!ROCKER_KEY_DIRS[e.key] || !rockerKeys.has(e.key)) return;
+    e.preventDefault();
+    rockerKeys.delete(e.key);
+    if (rockerKeys.size > 0) {
+      applyRockerKeys();
+    } else {
+      rocker.classList.remove('zoom-rocker-active');
+      releaseRockerKeys();
+      updateSafetyWatch();
+    }
+  }
+
+  function onRockerBlur() {
+    if (rockerKeys.size === 0) return;
+    rockerKeys.clear();
+    rocker.classList.remove('zoom-rocker-active');
+    releaseRockerKeys();
+    updateSafetyWatch();
+  }
+
+  rocker.addEventListener('keydown', onRockerKeyDown);
+  rocker.addEventListener('keyup', onRockerKeyUp);
+  rocker.addEventListener('blur', onRockerBlur);
+  cleanups.push(() => {
+    rocker.removeEventListener('keydown', onRockerKeyDown);
+    rocker.removeEventListener('keyup', onRockerKeyUp);
+    rocker.removeEventListener('blur', onRockerBlur);
+  });
 
   wrap.appendChild(rocker);
 
@@ -300,9 +546,14 @@ export function renderJoystick(container, { sessionId, profile, ptz, onError }) 
         cleanups.push(pressable(btn));
         const start = (e) => {
           e.preventDefault();
+          focusHolds += 1;
+          updateSafetyWatch();
           api.focus(sessionId, profile, 'continuous', { speed: direction * speed }).catch(reportError);
         };
         const stop = () => {
+          if (focusHolds === 0) return;
+          focusHolds -= 1;
+          updateSafetyWatch();
           api.focus(sessionId, profile, 'stop').catch(() => {});
         };
         btn.addEventListener('pointerdown', start);
@@ -356,6 +607,7 @@ export function renderJoystick(container, { sessionId, profile, ptz, onError }) 
 
   renderKnob();
   renderRocker();
+  updateAria();
   container.appendChild(wrap);
 
   return {
@@ -365,8 +617,13 @@ export function renderJoystick(container, { sessionId, profile, ptz, onError }) 
       if (trailingTimer) clearTimeout(trailingTimer);
       stopReturnSprings();
       if (rockerSpring) rockerSpring.stop();
-      // Never leave the camera moving because the panel went away.
-      if (holding) api.ptzStop(sessionId, profile, { panTilt: true, zoom: rockerHolding }).catch(() => {});
+      if (unsubscribeInactive) { unsubscribeInactive(); unsubscribeInactive = null; }
+      // Never leave the camera moving because the panel went away — that
+      // includes keyboard holds and the focus rocker, not just pointer drags.
+      if (anyHoldActive()) {
+        api.ptzStop(sessionId, profile, { panTilt: true, zoom: true }).catch(() => {});
+        if (focusHolds > 0) api.focus(sessionId, profile, 'stop').catch(() => {});
+      }
       cleanups.forEach((fn) => fn());
     },
   };

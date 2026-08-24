@@ -20,13 +20,16 @@ export class ApiError extends Error {
   }
 }
 
-async function request(method, path, body) {
+async function request(method, path, body, opts = {}) {
   let res;
   try {
     res = await fetch(path, {
       method,
       headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      // keepalive lets a request survive page unload — PTZ stop must land even
+      // when the tab is being backgrounded or closed.
+      keepalive: opts.keepalive === true,
     });
   } catch {
     throw new ApiError(
@@ -58,7 +61,7 @@ async function request(method, path, body) {
 }
 
 const get = (path) => request('GET', path);
-const post = (path, body) => request('POST', path, body);
+const post = (path, body, opts) => request('POST', path, body, opts);
 const patch = (path, body) => request('PATCH', path, body);
 const del = (path) => request('DELETE', path);
 
@@ -86,7 +89,9 @@ export const api = {
   ptzMove: (id, profile, { pan = 0, tilt = 0, zoom = 0 }) =>
     post(`${s(id)}/ptz/move`, { profile, pan, tilt, zoom }),
   ptzStop: (id, profile, { panTilt = true, zoom = true } = {}) =>
-    post(`${s(id)}/ptz/stop`, { profile, panTilt, zoom }),
+    // keepalive: a stop issued while the page is being hidden or closed must
+    // still reach the camera — a panning camera is a physical hazard.
+    post(`${s(id)}/ptz/stop`, { profile, panTilt, zoom }, { keepalive: true }),
   ptzRelative: (id, profile, { pan = 0, tilt = 0, zoom = 0, speed = 0.5 }) =>
     post(`${s(id)}/ptz/relative`, { profile, pan, tilt, zoom, speed }),
   ptzAbsolute: (id, profile, { pan = 0, tilt = 0, zoom = 0, speed = 0.5 }) =>

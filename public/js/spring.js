@@ -42,6 +42,21 @@ export function rubberband(overshoot, dimension, constant = 0.55) {
   return Math.sign(overshoot) * resisted;
 }
 
+// requestAnimationFrame is throttled to a halt in a hidden tab. Without this,
+// a spring that is mid-flight when the tab backgrounds would freeze at an
+// intermediate value — a half-open panel, a half-returned joystick knob —
+// until the tab is foregrounded again. When the document hides, every live
+// spring snaps straight to its target (firing onUpdate/onComplete), so the UI
+// can never be stuck between states.
+const liveSprings = new Set();
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'hidden') return;
+    for (const handle of [...liveSprings]) handle.settle();
+  });
+}
+
 /**
  * @param {Object} opts
  * @param {number} opts.from        starting presentation value
@@ -53,6 +68,7 @@ export function rubberband(overshoot, dimension, constant = 0.55) {
  * @param {() => void} [opts.onComplete]  fired once each time the spring settles
  * @returns {{ setTarget: (value: number, carryVelocity?: boolean) => void,
  *             stop: () => void,
+ *             settle: () => void,
  *             getValue: () => number,
  *             getVelocity: () => number,
  *             getTarget: () => number,
@@ -91,6 +107,7 @@ export function spring({
     v = 0;
     rafId = null;
     lastTime = null;
+    liveSprings.delete(handle);
     if (onUpdate) onUpdate(value);
     if (onComplete && !completed) {
       completed = true;
@@ -130,6 +147,7 @@ export function spring({
     if (rafId != null) return;
     completed = false;
     lastTime = null;
+    liveSprings.add(handle);
     rafId = requestAnimationFrame(step);
   }
 
@@ -154,6 +172,12 @@ export function spring({
       if (rafId != null) cancelAnimationFrame(rafId);
       rafId = null;
       lastTime = null;
+      liveSprings.delete(handle);
+    },
+    /** Snap to the target immediately, firing onUpdate/onComplete. */
+    settle() {
+      if (rafId != null) cancelAnimationFrame(rafId);
+      finish();
     },
     getValue: () => value,
     getVelocity: () => v,
