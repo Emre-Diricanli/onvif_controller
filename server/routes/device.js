@@ -2,12 +2,24 @@ import { Router } from 'express';
 import { AppError } from '../errors.js';
 import { requireSession } from '../sessions.js';
 import { readDevice, setRelayOutput, reboot, syncTime } from '../onvif/device.js';
+import { readNetwork, writeNetwork } from '../onvif/network.js';
 
 const router = Router({ mergeParams: true });
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 router.get('/', wrap(async (req, res) => {
   res.json(await readDevice(requireSession(req.params.id)));
+}));
+
+router.get('/network', wrap(async (req, res) => {
+  res.json(await readNetwork(requireSession(req.params.id)));
+}));
+
+router.patch('/network', wrap(async (req, res) => {
+  const session = requireSession(req.params.id);
+  const result = await writeNetwork(session, req.body?.settings);
+  if (result.relocation.expected) session.stale = true;
+  res.json(result);
 }));
 
 router.post('/relay', wrap(async (req, res) => {

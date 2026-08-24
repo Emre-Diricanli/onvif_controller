@@ -20,6 +20,7 @@ const FIXTURES = path.join(here, '..', 'node_modules', 'onvif', 'test', 'serverM
 const PORT = Number(process.argv[2] ?? 10101);
 const HOST = '127.0.0.1';
 const IMAGING_MODE = process.env.MOCK_IMAGING_MODE ?? 'default';
+const NETWORK_MODE = process.env.MOCK_NETWORK_MODE ?? 'default';
 
 if (!existsSync(FIXTURES)) {
   console.error(`Fixtures not found at ${FIXTURES}. Run npm install first.`);
@@ -115,6 +116,31 @@ const callCounts = Object.create(null);
 const imagingState = { Brightness: 255, ColorSaturation: 128, Contrast: 128, Sharpness: 128 };
 const ORIGINAL_IMAGING = { ...imagingState };
 const REPORTED_IMAGING_FIELDS = ['Brightness', 'ColorSaturation', 'Contrast', 'Focus', 'Sharpness'];
+const networkState = {
+  hostname: 'IPNC-RDK', dhcp: false, ipv4: '192.168.68.111', prefix: 24,
+  gateway: '192.168.0.1', dns: ['4.4.4.4', '8.8.8.8'], ntp: ['192.168.1.168'],
+};
+
+function networkResponse(op, inner) {
+  return `<?xml version="1.0" encoding="UTF-8"?><env:Envelope xmlns:env="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema"><env:Body><tds:${op}Response>${inner}</tds:${op}Response></env:Body></env:Envelope>`;
+}
+
+function getNetworkResponse(op) {
+  if (op === 'GetHostname') return networkResponse(op, `<tds:HostnameInformation><tt:FromDHCP>false</tt:FromDHCP><tt:Name>${networkState.hostname}</tt:Name></tds:HostnameInformation>`);
+  if (op === 'GetNetworkInterfaces') return networkResponse(op, `<tds:NetworkInterfaces token="eth0"><tt:Enabled>true</tt:Enabled><tt:Info><tt:Name>eth0</tt:Name><tt:HwAddress>28:57:be:65:7d:d5</tt:HwAddress><tt:MTU>1500</tt:MTU></tt:Info><tt:IPv4><tt:Enabled>true</tt:Enabled><tt:Config><tt:Manual><tt:Address>${networkState.ipv4}</tt:Address><tt:PrefixLength>${networkState.prefix}</tt:PrefixLength></tt:Manual><tt:DHCP>${networkState.dhcp}</tt:DHCP></tt:Config></tt:IPv4></tds:NetworkInterfaces>`);
+  if (op === 'GetNetworkDefaultGateway') return networkResponse(op, `<tds:NetworkGateway><tds:IPv4Address>${networkState.gateway}</tds:IPv4Address></tds:NetworkGateway>`);
+  if (op === 'GetDNS') return networkResponse(op, `<tds:DNSInformation><tt:FromDHCP>false</tt:FromDHCP>${networkState.dns.map((v) => `<tt:DNSManual><tt:Type>IPv4</tt:Type><tt:IPv4Address>${v}</tt:IPv4Address></tt:DNSManual>`).join('')}</tds:DNSInformation>`);
+  return networkResponse(op, `<tds:NTPInformation><tt:FromDHCP>false</tt:FromDHCP>${networkState.ntp.map((v) => `<tt:NTPManual><tt:Type>${/^\d/.test(v) ? 'IPv4' : 'DNS'}</tt:Type>${/^\d/.test(v) ? `<tt:IPv4Address>${v}</tt:IPv4Address>` : `<tt:DNSname>${v}</tt:DNSname>`}</tt:NTPManual>`).join('')}</tds:NTPInformation>`);
+}
+
+function textIn(xml, name) {
+  return xml.match(new RegExp(`<(?:[A-Za-z0-9_.-]+:)?${name}(?:\\s[^>]*)?>([^<]*)</(?:[A-Za-z0-9_.-]+:)?${name}>`, 'i'))?.[1] ?? null;
+}
+
+function textsIn(xml, container, child) {
+  return [...xml.matchAll(new RegExp(`<(?:\\w+:)?${container}\\b[^>]*>([\\s\\S]*?)</(?:\\w+:)?${container}>`, 'gi'))]
+    .map((match) => textIn(match[1], child) ?? textIn(match[1], 'DNSname')).filter(Boolean);
+}
 
 function imagingSettingsResponse() {
   const name = fixtureFor('imaging', 'GetImagingSettings');
@@ -199,6 +225,33 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+    if (service === 'device' && ['GetHostname', 'GetNetworkInterfaces', 'GetNetworkDefaultGateway', 'GetDNS', 'GetNTP'].includes(op)) {
+      res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+      res.end(getNetworkResponse(op));
+      return;
+    }
+
+    if (service === 'device' && ['SetHostname', 'SetNetworkInterfaces', 'SetNetworkDefaultGateway', 'SetDNS', 'SetNTP'].includes(op)) {
+      if (NETWORK_MODE !== 'ignore') {
+        if (op === 'SetHostname') networkState.hostname = textIn(body, 'Name') ?? networkState.hostname;
+        if (op === 'SetNetworkInterfaces') {
+          const dhcp = textIn(body, 'DHCP');
+          const ipv4 = textIn(body, 'Address');
+          const prefix = Number(textIn(body, 'PrefixLength'));
+          if (dhcp !== null) networkState.dhcp = dhcp.toLowerCase() === 'true';
+          if (ipv4) networkState.ipv4 = ipv4;
+          if (Number.isInteger(prefix) && prefix > 0) networkState.prefix = prefix;
+        }
+        if (op === 'SetNetworkDefaultGateway') networkState.gateway = textIn(body, 'IPv4Address') ?? networkState.gateway;
+        if (op === 'SetDNS') networkState.dns = textsIn(body, 'DNSManual', 'IPv4Address');
+        if (op === 'SetNTP') networkState.ntp = textsIn(body, 'NTPManual', 'IPv4Address');
+      }
+      const inner = op === 'SetNetworkInterfaces' ? '<tds:RebootNeeded>false</tds:RebootNeeded>' : '';
+      res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+      res.end(networkResponse(op, inner));
+      return;
+    }
+
     const name = fixtureFor(service, op);
     if (!name) {
       console.log(`  [mock] ${service}.${op} -> no fixture (returning fault)`);
@@ -219,4 +272,5 @@ server.listen(PORT, HOST, () => {
   console.log(`  ${available.size} fixtures loaded. Connect with any username/password.`);
   console.log('  MOCK_REJECT_AUTH=1 to test the 401 path, MOCK_SKEW_SECONDS=600 to test clock skew.');
   console.log(`  Imaging mode: ${IMAGING_MODE} (MOCK_IMAGING_MODE=ignore|clamp).`);
+  console.log(`  Network mode: ${NETWORK_MODE} (MOCK_NETWORK_MODE=ignore).`);
 });
