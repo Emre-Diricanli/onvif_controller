@@ -285,6 +285,10 @@ class PanelManager {
 
     this.panel = { name, root, closeBtn, anchorBtn, drag: { ty: 0, spring: null } };
     this.openName = name;
+    if (anchorBtn) {
+      anchorBtn.setAttribute('aria-haspopup', 'dialog');
+      anchorBtn.setAttribute('aria-expanded', 'true');
+    }
     this.onOpenChange(name);
 
     // Escape dismisses the panel from anywhere; it never traps focus.
@@ -415,8 +419,19 @@ class PanelManager {
     this.panel = null;
     this.openName = null;
     if (panel.dragCleanup) panel.dragCleanup();
+    if (panel.escapeCleanup) panel.escapeCleanup();
     if (panel.drag.spring) panel.drag.spring.stop();
     if (panel.openSpring) panel.openSpring.stop();
+
+    // Return focus to the control that opened the panel. Without this a
+    // keyboard user is dumped back at the top of the document every time they
+    // dismiss one, and Escape becomes a trap of a different kind.
+    if (panel.anchorBtn && panel.anchorBtn.isConnected && document.activeElement !== panel.anchorBtn) {
+      const active = document.activeElement;
+      const focusWasInPanel = !active || active === document.body || panel.root.contains(active);
+      if (focusWasInPanel) panel.anchorBtn.focus({ preventScroll: true });
+    }
+    if (panel.anchorBtn) panel.anchorBtn.setAttribute('aria-expanded', 'false');
 
     const { root, name } = panel;
     const entry = this.views.get(name);
@@ -481,6 +496,28 @@ export function renderController(root, { session, onDisconnect }) {
   video.playsInline = true;
   video.autoplay = true;
   stage.appendChild(video);
+
+  // SPEC.md §5/§7: degrade visibly. An empty black rectangle reads as "the app
+  // is broken"; say what is wrong, what it means, and offer the way out.
+  const stageMessage = el('div', 'stage-message');
+  const stageMessageTitle = el('p', 'stage-message-title', '');
+  const stageMessageBody = el('p', 'stage-message-body', '');
+  const stageRetry = el('button', 'btn btn-primary btn-sm', 'Try again');
+  stageRetry.type = 'button';
+  stageMessage.append(stageMessageTitle, stageMessageBody, stageRetry);
+  stageMessage.hidden = true;
+  stage.appendChild(stageMessage);
+
+  function showStageMessage(title, body, { retry = true } = {}) {
+    stageMessageTitle.textContent = title;
+    stageMessageBody.textContent = body ?? '';
+    stageMessageBody.hidden = !body;
+    stageRetry.hidden = !retry;
+    stageMessage.hidden = false;
+  }
+  function hideStageMessage() {
+    stageMessage.hidden = true;
+  }
 
   // --- Top overlay: profile switcher, stats, connection state ---
   const topBar = el('div', 'overlay overlay-top');
@@ -642,6 +679,23 @@ export function renderController(root, { session, onDisconnect }) {
     connLabel.textContent = label;
     connDot.dataset.tone = tone;
     stage.dataset.playerState = state;
+
+    if (state === 'playing') {
+      hideStageMessage();
+    } else if (state === 'connecting') {
+      showStageMessage('Starting the live view…',
+        'Negotiating RTSP with the camera and starting the encoder.', { retry: false });
+    } else if (state === 'reconnecting') {
+      showStageMessage('Live view interrupted',
+        'Lost contact with the stream. Reconnecting automatically — the camera itself may still be fine.',
+        { retry: false });
+    } else if (state === 'degraded') {
+      showStageMessage('Showing snapshots instead of live video',
+        'The live stream could not be sustained, so this is refreshing still images about twice a second.');
+    } else if (state === 'error') {
+      showStageMessage('Live view unavailable',
+        'The stream could not be started. Check that the camera is reachable over RTSP on port 554 and that this ONVIF user is allowed to view the channel.');
+    }
   });
   const offStats = player.on('stats', (s) => {
     if (destroyed || !s) return;
@@ -656,6 +710,18 @@ export function renderController(root, { session, onDisconnect }) {
     stats.textContent = parts.join(' · ');
     stats.hidden = parts.length === 0;
   });
+  const retryStream = () => {
+    if (destroyed || !currentProfile) return;
+    hideStageMessage();
+    player.stop();
+    player.start(currentProfile).catch((err) => {
+      showError(err instanceof ApiError ? err : new ApiError('STREAM_FAILED', String(err)));
+      showStageMessage('Live view unavailable', err?.hint || err?.message || 'The stream could not be started.');
+    });
+  };
+  stageRetry.addEventListener('click', retryStream);
+  cleanups.push(() => stageRetry.removeEventListener('click', retryStream));
+
   const offDegraded = player.on('degraded', ({ reason } = {}) => {
     if (destroyed) return;
     connLabel.textContent = 'Degraded — snapshots';

@@ -996,3 +996,43 @@ input, select {
     top: var(--space-2);
   }
 }
+
+
+/* --- Stream unavailable / degraded message ------------------------------- *
+ * SPEC.md §5 requires visible degradation. This sits centred over the video
+ * surface, above the player's own overlays but below the panels and the dock,
+ * so it never covers a control the operator needs to reach.
+ */
+.stage-message {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-6);
+  text-align: center;
+  pointer-events: none;
+}
+
+.stage-message > * {
+  pointer-events: auto;
+}
+
+.stage-message-title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-heading);
+  color: var(--text);
+}
+
+.stage-message-body {
+  margin: 0;
+  max-width: 34rem;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
