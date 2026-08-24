@@ -224,9 +224,10 @@ function renderCapabilities(container, { session }) {
 // with rubber-band resistance and momentum projection.
 // ---------------------------------------------------------------------------
 class PanelManager {
-  constructor(host, { onError }) {
+  constructor(host, { onError, onOpenChange }) {
     this.host = host;
     this.onError = onError;
+    this.onOpenChange = onOpenChange || (() => {});
     this.openName = null;
     this.panel = null;       // { name, root, view, motion, dragCleanup }
     this.views = new Map();  // name -> { view, builtForProfile }
@@ -258,6 +259,8 @@ class PanelManager {
 
     const root = el('div', 'panel');
     root.setAttribute('role', 'dialog');
+    root.setAttribute('aria-modal', 'false');
+    root.setAttribute('aria-label', name);
     const header = el('div', 'panel-header');
     const grip = el('div', 'panel-grip');
     const title = el('h2', 'panel-title', name);
@@ -280,8 +283,21 @@ class PanelManager {
       content.appendChild(entry.view.el);
     }
 
-    this.panel = { name, root, closeBtn, drag: { ty: 0, spring: null } };
+    this.panel = { name, root, closeBtn, anchorBtn, drag: { ty: 0, spring: null } };
     this.openName = name;
+    this.onOpenChange(name);
+
+    // Escape dismisses the panel from anywhere; it never traps focus.
+    const onKeydown = (e) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      this.close();
+    };
+    document.addEventListener('keydown', onKeydown);
+    this.panel.escapeCleanup = () => document.removeEventListener('keydown', onKeydown);
+
+    // Focus moves into the panel when it opens...
+    closeBtn.focus({ preventScroll: true });
 
     // Anchor the transform-origin to the control that opened the panel, so
     // enter and exit run along the same spatial path.

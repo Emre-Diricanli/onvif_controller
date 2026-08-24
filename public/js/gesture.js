@@ -120,10 +120,19 @@ export function draggable(el, { hysteresis = DEFAULT_HYSTERESIS, axis = 'any', o
       if (onCancel) onCancel({ event: ev });
     }
 
+    function handleLeave(ev) {
+      if (ev.pointerId !== e.pointerId) return;
+      // Pointer released outside the window: no pointerup will ever arrive,
+      // but a leave with no buttons held tells us the gesture is over.
+      if (ev.buttons !== 0) return;
+      handleUp(ev);
+    }
+
     function cleanup() {
       el.removeEventListener('pointermove', handleMove);
       el.removeEventListener('pointerup', handleUp);
       el.removeEventListener('pointercancel', handleCancel);
+      el.removeEventListener('pointerleave', handleLeave);
       if (el.releasePointerCapture) {
         try { el.releasePointerCapture(e.pointerId); } catch { /* already released */ }
       }
@@ -132,6 +141,7 @@ export function draggable(el, { hysteresis = DEFAULT_HYSTERESIS, axis = 'any', o
     el.addEventListener('pointermove', handleMove);
     el.addEventListener('pointerup', handleUp);
     el.addEventListener('pointercancel', handleCancel);
+    el.addEventListener('pointerleave', handleLeave);
   }
 
   el.addEventListener('pointerdown', handleDown);
