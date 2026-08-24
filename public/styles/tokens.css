@@ -1,0 +1,158 @@
+/* tokens.css — the design token set.
+ *
+ * Everything visual in the app resolves through these custom properties.
+ * player.css consumes --surface, --text, --accent, --radius-lg and --blur;
+ * they must always be defined. Light and dark are both fully designed via
+ * prefers-color-scheme. Spacing in rem so Dynamic Type scaling holds.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* --- Type --- */
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-md: 0.9375rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+  --tracking-heading: -0.02em;
+  --tracking-body: 0;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* --- Spacing (rem) --- */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+
+  /* --- Radii --- */
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1.25rem;
+  --radius-pill: 62.4375rem;
+
+  /* --- Material --- */
+  --blur: blur(20px) saturate(180%);
+
+  /* --- Motion --- */
+  --motion-response: 0.35s;
+
+  /* --- Shadows --- */
+  --shadow-panel: 0 0.5rem 2rem rgba(0, 0, 0, 0.12), 0 0 0 0.03125rem rgba(0, 0, 0, 0.04);
+  --shadow-pop: 0 0.75rem 2.5rem rgba(0, 0, 0, 0.18), 0 0 0 0.03125rem rgba(0, 0, 0, 0.05);
+}
+
+/* --- Light (default) --- */
+:root {
+  --bg: #f2f2f7;
+  --surface: rgba(255, 255, 255, 0.72);
+  --surface-solid: #ffffff;
+  --surface-raised: rgba(255, 255, 255, 0.86);
+  --surface-sunken: rgba(0, 0, 0, 0.04);
+  --text: #1c1c1e;
+  --text-secondary: rgba(60, 60, 67, 0.6);
+  --text-tertiary: rgba(60, 60, 67, 0.38);
+  --accent: #0a84ff;
+  --accent-contrast: #ffffff;
+  --accent-fill: rgba(10, 132, 255, 0.14);
+  --danger: #ff3b30;
+  --danger-fill: rgba(255, 59, 48, 0.12);
+  --success: #34c759;
+  --success-fill: rgba(52, 199, 89, 0.14);
+  --warning: #ff9500;
+  --warning-fill: rgba(255, 149, 0, 0.14);
+  --border: rgba(0, 0, 0, 0.1);
+  --border-strong: rgba(0, 0, 0, 0.18);
+  --scrim: rgba(0, 0, 0, 0.35);
+  --knob: rgba(255, 255, 255, 0.9);
+  --track: rgba(0, 0, 0, 0.12);
+}
+
+/* --- Dark --- */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #000000;
+    --surface: rgba(28, 28, 30, 0.66);
+    --surface-solid: #1c1c1e;
+    --surface-raised: rgba(44, 44, 46, 0.78);
+    --surface-sunken: rgba(255, 255, 255, 0.06);
+    --text: #f2f2f7;
+    --text-secondary: rgba(235, 235, 245, 0.6);
+    --text-tertiary: rgba(235, 235, 245, 0.38);
+    --accent: #0a84ff;
+    --accent-contrast: #ffffff;
+    --accent-fill: rgba(10, 132, 255, 0.22);
+    --danger: #ff453a;
+    --danger-fill: rgba(255, 69, 58, 0.18);
+    --success: #30d158;
+    --success-fill: rgba(48, 209, 88, 0.18);
+    --warning: #ff9f0a;
+    --warning-fill: rgba(255, 159, 10, 0.18);
+    --border: rgba(255, 255, 255, 0.14);
+    --border-strong: rgba(255, 255, 255, 0.26);
+    --scrim: rgba(0, 0, 0, 0.55);
+    --knob: rgba(58, 58, 60, 0.92);
+    --track: rgba(255, 255, 255, 0.16);
+    --shadow-panel: 0 0.5rem 2rem rgba(0, 0, 0, 0.5), 0 0 0 0.03125rem rgba(255, 255, 255, 0.06);
+    --shadow-pop: 0 0.75rem 2.5rem rgba(0, 0, 0, 0.6), 0 0 0 0.03125rem rgba(255, 255, 255, 0.08);
+  }
+}
+
+/* --- Reduced transparency: solid surfaces, no blur --- */
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --blur: none;
+    --surface: var(--surface-solid);
+    --surface-raised: var(--surface-solid);
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --surface: #ffffff;
+      --surface-raised: #ffffff;
+      --surface-sunken: #e5e5ea;
+    }
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface: #1c1c1e;
+      --surface-raised: #2c2c2e;
+      --surface-sunken: #2c2c2e;
+    }
+  }
+}
+
+/* --- Increased contrast: near-solid backgrounds, defined borders --- */
+@media (prefers-contrast: more) {
+  :root {
+    --surface: var(--surface-solid);
+    --surface-raised: var(--surface-solid);
+    --border: var(--border-strong);
+    --text-secondary: var(--text);
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #ffffff;
+      --surface-solid: #ffffff;
+      --surface: #ffffff;
+      --surface-raised: #ffffff;
+      --border-strong: rgba(0, 0, 0, 0.5);
+    }
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #000000;
+      --surface-solid: #000000;
+      --surface: #000000;
+      --surface-raised: #000000;
+      --border-strong: rgba(255, 255, 255, 0.6);
+    }
+  }
+}
