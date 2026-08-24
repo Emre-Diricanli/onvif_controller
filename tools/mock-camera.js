@@ -27,16 +27,35 @@ if (!existsSync(FIXTURES)) {
 
 const available = new Set(readdirSync(FIXTURES).filter((f) => f.endsWith('.xml')).map((f) => f.slice(0, -4)));
 
-const SERVICE_BY_PATH = [
-  [/media/i, 'media'],
-  [/ptz/i, 'ptz'],
-  [/imaging/i, 'imaging'],
-  [/event/i, 'events'],
-  [/device/i, 'device'],
+/**
+ * Which fixture prefix a request belongs to. Dispatch on the SOAP namespace in
+ * the body rather than the URL path: real devices advertise one endpoint for
+ * several services (Hikvision uses /onvif/services for all of them), so the path
+ * says nothing about which service is being called.
+ */
+const SERVICE_BY_NAMESPACE = [
+  [/ver10\/media|ver20\/media/i, 'media'],
+  [/ver20\/ptz/i, 'ptz'],
+  [/ver20\/imaging/i, 'imaging'],
+  [/ver10\/events|wsn\/b-2/i, 'events'],
+  [/ver10\/device/i, 'device'],
 ];
 
-function serviceFor(url) {
-  for (const [re, name] of SERVICE_BY_PATH) if (re.test(url)) return name;
+function serviceFor(body, url) {
+  // The operation element carries the service namespace, either inline or via a
+  // prefix declared on an ancestor.
+  const inline = body.match(/<(?:[A-Za-z0-9_.-]+:)?Body[^>]*>\s*<[^>]*xmlns(?::[A-Za-z0-9_.-]+)?="([^"]+)"/);
+  if (inline) {
+    for (const [re, name] of SERVICE_BY_NAMESPACE) if (re.test(inline[1])) return name;
+  }
+  const prefix = body.match(/<(?:[A-Za-z0-9_.-]+:)?Body[^>]*>\s*<([A-Za-z0-9_.-]+):/);
+  if (prefix) {
+    const declared = body.match(new RegExp(`xmlns:${prefix[1]}="([^"]+)"`));
+    if (declared) {
+      for (const [re, name] of SERVICE_BY_NAMESPACE) if (re.test(declared[1])) return name;
+    }
+  }
+  for (const [re, name] of SERVICE_BY_NAMESPACE) if (re.test(url ?? '')) return name;
   return 'device';
 }
 
@@ -46,8 +65,11 @@ function operationOf(body) {
   return m ? m[2] : null;
 }
 
+const ALL_SERVICES = ['media', 'ptz', 'imaging', 'events', 'device'];
+
 function fixtureFor(service, op) {
-  for (const candidate of [`${service}.${op}`, op]) {
+  const order = [`${service}.${op}`, op, ...ALL_SERVICES.map((s) => `${s}.${op}`)];
+  for (const candidate of order) {
     if (available.has(candidate)) return candidate;
   }
   return null;
@@ -92,7 +114,7 @@ const server = http.createServer((req, res) => {
   req.on('data', (c) => { body += c; });
   req.on('end', () => {
     const op = operationOf(body);
-    const service = serviceFor(req.url ?? '');
+    const service = serviceFor(body, req.url);
     const password = (body.match(/<[^>]*Password[^>]*>([^<]*)</) ?? [])[1] ?? '';
 
     // GetSystemDateAndTime is the one unauthenticated call in ONVIF, and the

@@ -52,7 +52,7 @@ Codes: `BAD_REQUEST`, `UNAUTHORIZED`, `NOT_FOUND`, `SESSION_EXPIRED`,
   "capabilities": {
     "media": true, "media2": false, "ptz": true, "imaging": true,
     "events": true, "analytics": false, "recording": false,
-    "relayOutputs": 1, "audioBackchannel": false
+    "deviceIO": true, "relayOutputs": 1, "audioBackchannel": false
   },
   "profiles": [
     {
@@ -71,6 +71,11 @@ Codes: `BAD_REQUEST`, `UNAUTHORIZED`, `NOT_FOUND`, `SESSION_EXPIRED`,
 }
 ```
 `ptz` is `null` when `capabilities.ptz` is false.
+
+`capabilities` is derived from GetServices where the device supports it, falling
+back to GetCapabilities on older firmware. `relayOutputs` is the count actually
+returned by GetRelayOutputs, not a capability flag — devices advertise deviceIO
+without relays and vice versa.
 
 ### `GET /api/session/:id`
 → the same payload as `/api/connect`, minus `sessionId`. Used to rehydrate the UI.

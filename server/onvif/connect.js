@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import { callCam, tryCam, asArray, num, authorizeUri } from './util.js';
 import { describeProfiles } from './media.js';
 import { readPtzCapabilities } from './ptz.js';
+import { readRelayOutputs } from './device.js';
 
 const { Cam } = onvif;
 
@@ -133,21 +134,46 @@ function connectCam({ host, port, username, password }) {
   });
 }
 
+/**
+ * Build the capability matrix.
+ *
+ * Source of truth is GetServices (`cam.services`), not GetCapabilities: the
+ * `onvif` library prefers GetServices on any device that supports it and then
+ * never populates `cam.capabilities` at all, so reading only the latter reports
+ * every service as absent. GetCapabilities is the fallback for older firmware.
+ */
+const SERVICE_NAMESPACES = {
+  media: /ver10\/media\/wsdl/i,
+  media2: /ver20\/media\/wsdl/i,
+  ptz: /ver20\/ptz\/wsdl/i,
+  imaging: /ver20\/imaging\/wsdl/i,
+  events: /ver10\/events\/wsdl/i,
+  analytics: /ver20\/analytics\/wsdl/i,
+  recording: /ver10\/recording\/wsdl/i,
+  deviceIO: /ver10\/deviceIO\/wsdl/i,
+};
+
 function readCapabilityMatrix(cam) {
-  const caps = cam.capabilities ?? {};
   const services = asArray(cam.services);
-  const hasNamespace = (fragment) =>
-    services.some((s) => typeof s?.namespace === 'string' && s.namespace.includes(fragment));
+  const has = (key) => services.some((s) => typeof s?.namespace === 'string' && SERVICE_NAMESPACES[key].test(s.namespace));
+
+  const caps = cam.capabilities ?? {};
+  const fallback = (key, ...paths) => {
+    for (const path of paths) if (path) return true;
+    return false;
+  };
 
   return {
-    media: Boolean(caps.media?.XAddr ?? caps.Media?.XAddr ?? cam.media),
-    media2: hasNamespace('ver20/media'),
-    ptz: Boolean(caps.PTZ?.XAddr ?? caps.ptz?.XAddr),
-    imaging: Boolean(caps.imaging?.XAddr ?? caps.Imaging?.XAddr),
-    events: Boolean(caps.events?.XAddr ?? caps.Events?.XAddr),
-    analytics: Boolean(caps.analytics?.XAddr ?? caps.Analytics?.XAddr) || hasNamespace('analytics'),
-    recording: hasNamespace('recording'),
-    relayOutputs: num(caps.device?.IO?.relayOutputs ?? caps.Device?.IO?.RelayOutputs, 0) ?? 0,
+    media: has('media') || fallback('media', caps.media?.XAddr, caps.Media?.XAddr),
+    media2: has('media2'),
+    ptz: has('ptz') || fallback('ptz', caps.PTZ?.XAddr, caps.ptz?.XAddr),
+    imaging: has('imaging') || fallback('imaging', caps.imaging?.XAddr, caps.Imaging?.XAddr),
+    events: has('events') || fallback('events', caps.events?.XAddr, caps.Events?.XAddr),
+    analytics: has('analytics') || fallback('analytics', caps.analytics?.XAddr, caps.Analytics?.XAddr),
+    recording: has('recording'),
+    deviceIO: has('deviceIO'),
+    // Replaced with the real count once the relay outputs are actually read.
+    relayOutputs: 0,
     audioBackchannel: Boolean(caps.media?.extension?.audioOutputs ?? false),
   };
 }
@@ -161,14 +187,20 @@ function readClock(systemDateAndTime) {
   const localTime = new Date();
   let deviceTime = null;
 
-  const utc = systemDateAndTime?.UTCDateTime ?? systemDateAndTime?.utcDateTime;
-  if (utc?.date && utc?.time) {
-    deviceTime = new Date(Date.UTC(
-      num(utc.date.year, 1970), num(utc.date.month, 1) - 1, num(utc.date.day, 1),
-      num(utc.time.hour, 0), num(utc.time.minute, 0), num(utc.time.second, 0),
-    ));
+  // The library normalizes this differently depending on the device: usually a
+  // bare Date, sometimes the raw UTCDateTime structure.
+  if (systemDateAndTime instanceof Date) {
+    deviceTime = systemDateAndTime;
   } else if (systemDateAndTime?.dateTime instanceof Date) {
     deviceTime = systemDateAndTime.dateTime;
+  } else {
+    const utc = systemDateAndTime?.UTCDateTime ?? systemDateAndTime?.utcDateTime;
+    if (utc?.date && utc?.time) {
+      deviceTime = new Date(Date.UTC(
+        num(utc.date.year, 1970), num(utc.date.month, 1) - 1, num(utc.date.day, 1),
+        num(utc.time.hour, 0), num(utc.time.minute, 0), num(utc.time.second, 0),
+      ));
+    }
   }
 
   if (!deviceTime || Number.isNaN(deviceTime.getTime())) {
@@ -206,6 +238,11 @@ export async function connectDevice({ host, port, username, password }) {
     throw new AppError('DEVICE_ERROR', 'The device authenticated but reported no media profiles.',
       'On a Hikvision NVR, confirm at least one channel is online and that the ONVIF user has permission to view it.');
   }
+
+  // Ask for the relay outputs rather than trusting a capability flag: plenty of
+  // devices advertise deviceIO and expose no relays, and vice versa.
+  const relays = await readRelayOutputs(cam, config.onvifTimeoutMs);
+  capabilities.relayOutputs = relays.length;
 
   const ptz = capabilities.ptz ? await readPtzCapabilities(cam, profiles, ctx) : null;
   // A device can advertise the PTZ service and still have no movable node.
