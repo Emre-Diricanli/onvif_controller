@@ -47,3 +47,15 @@
   line-height: 1.5;
   color: var(--text-secondary);
 }
+
+/* Shown when the proprietary vendor API, not ONVIF, is driving the picture. */
+.imaging-source-notice {
+  margin: 0;
+  padding: var(--space-3);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-secondary);
+  background: var(--surface-sunken);
+  border: 0.03125rem solid var(--border);
+  border-radius: var(--radius-md);
+}

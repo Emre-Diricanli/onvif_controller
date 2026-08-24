@@ -243,6 +243,18 @@ Partial update; only supplied keys change.
 }
 ```
 
+Both the `GET` and `PATCH` imaging responses also carry:
+
+- `source` — `"onvif"`, or a vendor driver id (e.g. `"vatilon"`) when the
+  picture is being driven through a camera's proprietary API instead.
+- `driver` — a human-readable driver name, present only when `source` is not
+  `"onvif"`.
+
+ONVIF is always tried first. A vendor driver is consulted only after ONVIF has
+been observed to accept a write and change nothing, and only for that session.
+If the vendor path fails, the response falls back to ONVIF's honest result
+rather than erroring. See `VENDOR.md`.
+
 `applied[field]` is `false` when the device still reports the previous value
 after the write and a short confirmation poll. This is not hypothetical: some
 Hikvision firmware answers SetImagingSettings with success and silently keeps

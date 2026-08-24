@@ -4,6 +4,7 @@ import { config } from './config.js';
 import { AppError } from './errors.js';
 import { attachEvents } from './onvif/events.js';
 import { stopMove, disarmMoveWatchdog } from './onvif/ptz.js';
+import { closeVendor } from './vendor/index.js';
 
 /** In-memory only. Credentials must never reach disk. */
 const sessions = new Map();
@@ -98,6 +99,8 @@ export function destroySession(id) {
       stopMove(session, { profileToken, panTilt: true, zoom: true }).catch(() => {});
     }
   }
+  // A vendor driver may hold a socket and a session heartbeat timer.
+  try { closeVendor(session); } catch { /* already gone */ }
   try { session.events?.detach?.(); } catch { /* ignore */ }
   try { session.cam?.removeAllListeners?.(); } catch { /* ignore */ }
 

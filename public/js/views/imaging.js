@@ -80,7 +80,10 @@ export function renderImaging(container, { sessionId, profile, onError }) {
   );
   stubNotice.hidden = true;
 
-  wrap.append(status, stubNotice, body);
+  const sourceNotice = el('p', 'imaging-source-notice');
+  sourceNotice.hidden = true;
+
+  wrap.append(status, stubNotice, sourceNotice, body);
   container.appendChild(wrap);
 
   // Every control owns its presentation value until its newest write settles.
@@ -125,6 +128,13 @@ export function renderImaging(container, { sessionId, profile, onError }) {
 
     if (!applied) refusedFields.add(pathKey);
     else refusedFields.delete(pathKey);
+    if (res.source && res.source !== 'onvif') {
+      // The vendor path answered, so the earlier refusals no longer stand.
+      refusedFields.clear();
+      entry.message.textContent = '';
+      entry.row.classList.remove('imaging-control-refused');
+    }
+    updateSourceNotice(res);
     updateStubNotice();
   }
 
@@ -135,8 +145,27 @@ export function renderImaging(container, { sessionId, profile, onError }) {
    * again — so once several distinct controls have all been ignored, say what is
    * actually going on instead of repeating a per-field "refused" forever.
    */
+  /**
+   * Tell the operator which path actually moved the picture. ONVIF is silent
+   * because it is the expected case; the proprietary fallback is worth naming,
+   * because it is undocumented, firmware-specific, and can stop working after
+   * a camera update.
+   */
+  function updateSourceNotice(res) {
+    const viaVendor = Boolean(res?.source) && res.source !== 'onvif';
+    sourceNotice.hidden = !viaVendor;
+    if (viaVendor) {
+      sourceNotice.textContent =
+        `This camera ignores ONVIF imaging commands, so these controls are going through its `
+        + `${res.driver || 'own'} interface instead. That is an undocumented API and may stop `
+        + `working after a firmware update.`;
+    }
+  }
+
   function updateStubNotice() {
-    const looksLikeStub = refusedFields.size >= 2;
+    // Superseded once the vendor path is driving the picture.
+    if (!sourceNotice.hidden) { stubNotice.hidden = true; return; }
+    const looksLikeStub = refusedFields.size >= 1;
     stubNotice.hidden = !looksLikeStub;
     for (const [key, entry] of [...sliders, ...segmented]) {
       if (!entry.message) continue;

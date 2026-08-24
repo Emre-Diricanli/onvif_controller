@@ -1,5 +1,8 @@
 import { AppError } from '../errors.js';
 import { callCam, tryCam, asArray, num } from './util.js';
+import {
+  ONVIF_SOURCE, looksLikeOnvifStub, tryVendorWrite, tryVendorRead, vendorDriverId, vendorDriverLabel,
+} from '../vendor/index.js';
 
 const SCHEMA = 'http://www.onvif.org/ver10/schema';
 const IMG20 = 'http://www.onvif.org/ver20/imaging/wsdl';
@@ -161,7 +164,27 @@ export async function readImaging(session, profileToken) {
       '| profile claimed:', JSON.stringify(session.profileMap.get(profileToken)?.videoSourceToken ?? null));
     console.log('[onvif imaging] GetImagingSettings raw:', safeTrace(JSON.stringify(settings)));
   }
-  return { settings: readSettings(settings), options: readOptions(options) };
+  const onvifResult = {
+    settings: readSettings(settings),
+    options: readOptions(options),
+    source: ONVIF_SOURCE,
+  };
+
+  // Once a driver owns the picture, ONVIF's numbers are stale fiction: the
+  // camera reports its own defaults regardless of what was actually set.
+  if (session.vendor?.owns) {
+    const vendor = await tryVendorRead(session);
+    if (vendor) {
+      return {
+        ...vendor,
+        // Keep ONVIF's ranges where the driver could not determine one.
+        options: { ...onvifResult.options, ...vendor.options },
+        driver: vendorDriverLabel(session),
+      };
+    }
+  }
+
+  return onvifResult;
 }
 
 const esc = (v) => String(v).replace(/[<>&"']/g, (ch) => (
@@ -328,6 +351,7 @@ export async function writeImaging(session, profileToken, patch) {
     });
     if (settled) break;
   }
+  after.source = ONVIF_SOURCE;
   after.applied = Object.fromEntries(patched.map(([key, requested]) => {
     const actual = after.settings[key];
     const old = before.settings[key];
@@ -336,6 +360,22 @@ export async function writeImaging(session, profileToken, patch) {
       : same(actual, requested) || !same(actual, old);
     return [key, accepted];
   }));
+
+  // ONVIF said yes and changed nothing. That is the signature of a stub
+  // Imaging service, and the only point at which a proprietary API is worth
+  // reaching for. Everything up to here is unchanged for a camera that works.
+  if (looksLikeOnvifStub(after.applied)) {
+    const vendor = await tryVendorWrite(session, effectivePatch);
+    if (vendor && looksLikeOnvifStub(vendor.applied) === false) {
+      session.vendor.owns = true;
+      return {
+        ...vendor,
+        options: { ...after.options, ...vendor.options },
+        driver: vendorDriverLabel(session),
+      };
+    }
+  }
+
   return after;
 }
 
