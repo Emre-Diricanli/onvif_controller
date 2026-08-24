@@ -18,6 +18,23 @@ import { handleEventsSocket } from './ws/events.js';
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
+
+/**
+ * The app has no authentication of its own: anything that can reach it can drive
+ * the camera. Browsers do not apply CORS to WebSocket upgrades, so without this
+ * any page the operator visits could open /ws/events or /ws/stream against
+ * localhost. Enforce same-origin on both surfaces.
+ */
+function isSameOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true; // curl, native clients, and same-origin GETs send none
+  try {
+    return new URL(origin).host === req.headers.host;
+  } catch {
+    return false;
+  }
+}
+
 const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '64kb' }));
@@ -25,8 +42,15 @@ app.use(express.json({ limit: '64kb' }));
 // The app proxies camera control with no auth of its own, so keep it same-origin.
 app.use((req, res, next) => {
   res.set('X-Content-Type-Options', 'nosniff');
+  // Session ids travel in URLs; don't leak them to any third party.
   res.set('Referrer-Policy', 'no-referrer');
   next();
+});
+
+app.use('/api', (req, res, next) => {
+  if (isSameOrigin(req)) return next();
+  next(new AppError('BAD_REQUEST', 'Cross-origin requests are not accepted.',
+    'Open the controller directly at its own address rather than embedding it in another page.'));
 });
 
 app.get('/api/health', (_req, res) => {
@@ -60,6 +84,12 @@ server.on('upgrade', (req, socket, head) => {
   try {
     url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
   } catch {
+    socket.destroy();
+    return;
+  }
+
+  if (!isSameOrigin(req)) {
+    socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
     socket.destroy();
     return;
   }

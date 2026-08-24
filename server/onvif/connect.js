@@ -1,4 +1,6 @@
 import onvif from 'onvif';
+import net from 'node:net';
+import dns from 'node:dns/promises';
 import { AppError, mapOnvifError } from '../errors.js';
 import { config } from '../config.js';
 import { callCam, tryCam, asArray, num, authorizeUri } from './util.js';
@@ -7,27 +9,88 @@ import { readPtzCapabilities } from './ptz.js';
 
 const { Cam } = onvif;
 
-const PRIVATE_DENY = [
-  // Cloud instance metadata. This app is run from hosts inside AWS, so an
-  // operator-supplied "camera host" is a live SSRF vector.
-  /^169\.254\.169\.254$/,
+/**
+ * Cloud instance metadata addresses. This app is operated from hosts inside AWS,
+ * so an operator-supplied "camera host" is a live SSRF vector.
+ *
+ * Note what is deliberately NOT blocked: private RFC1918 ranges. Reaching
+ * cameras on the LAN is the entire purpose of this tool, so blocking 192.168/16
+ * or 10/8 would break it. Link-local (169.254/16) is blocked because it is APIPA
+ * plus the metadata service — never a working camera address.
+ */
+const METADATA_ADDRESSES = new Set([
+  '169.254.169.254',   // AWS / Azure / GCP / OpenStack IMDS
+  '100.100.100.200',   // Alibaba Cloud
+  'fd00:ec2::254',     // AWS IMDS over IPv6
+]);
+
+const METADATA_HOSTNAMES = [
   /^metadata\.google\.internal$/i,
-  /^100\.100\.100\.200$/,
+  /^metadata\.goog$/i,
+  /^instance-data(\.[a-z0-9.-]+)?$/i,
 ];
+
+function isBlockedAddress(ip) {
+  const normalized = ip.toLowerCase().replace(/^\[|\]$/g, '').replace(/%.*$/, '');
+  if (METADATA_ADDRESSES.has(normalized)) return true;
+
+  const version = net.isIP(normalized);
+  if (version === 4) {
+    const octets = normalized.split('.').map(Number);
+    // 169.254.0.0/16 — APIPA and every cloud metadata service that rides on it.
+    if (octets[0] === 169 && octets[1] === 254) return true;
+  }
+  if (version === 6) {
+    // fe80::/10 link-local, and the fd00:ec2::/32 IMDS prefix.
+    if (/^fe[89ab][0-9a-f]:/.test(normalized)) return true;
+    if (normalized.startsWith('fd00:ec2:')) return true;
+  }
+  return false;
+}
 
 export function assertSafeHost(host) {
   if (typeof host !== 'string' || !host.trim()) {
     throw new AppError('BAD_REQUEST', 'A camera host or IP address is required.');
   }
-  const trimmed = host.trim();
-  if (PRIVATE_DENY.some((re) => re.test(trimmed))) {
-    throw new AppError('BAD_REQUEST', 'That address is not a camera.',
-      'Cloud metadata endpoints are blocked because this app proxies requests on your behalf.');
-  }
+  const trimmed = host.trim().replace(/^\[|\]$/g, '');
   if (/[\s/\\?#]/.test(trimmed)) {
     throw new AppError('BAD_REQUEST', 'Enter just the host or IP address, without a URL path.');
   }
+  if (METADATA_HOSTNAMES.some((re) => re.test(trimmed)) || isBlockedAddress(trimmed)) {
+    throw new AppError('BAD_REQUEST', 'That address is not a camera.',
+      'Cloud metadata and link-local addresses are blocked because this app makes requests on your behalf.');
+  }
   return trimmed;
+}
+
+/**
+ * Resolve the host once, reject every address it maps to that is blocked, and
+ * return the pinned IP. Connecting to the resolved address rather than the name
+ * closes the DNS-rebinding window between the check and the connect.
+ */
+async function resolveSafeHost(host) {
+  const trimmed = assertSafeHost(host);
+  if (net.isIP(trimmed)) return trimmed;
+
+  let records;
+  try {
+    records = await dns.lookup(trimmed, { all: true });
+  } catch {
+    throw new AppError('DEVICE_UNREACHABLE', `The hostname "${trimmed}" could not be resolved.`,
+      'Use the camera IP address instead of a hostname, or fix DNS on this machine.');
+  }
+  if (!records.length) {
+    throw new AppError('DEVICE_UNREACHABLE', `The hostname "${trimmed}" did not resolve to any address.`);
+  }
+  // Reject if ANY resolved address is blocked — a name that returns both a safe
+  // and a blocked address is exactly the rebinding case we care about.
+  for (const { address } of records) {
+    if (isBlockedAddress(address)) {
+      throw new AppError('BAD_REQUEST', `"${trimmed}" resolves to a blocked address.`,
+        'Cloud metadata and link-local addresses are blocked because this app makes requests on your behalf.');
+    }
+  }
+  return records[0].address;
 }
 
 function connectCam({ host, port, username, password }) {
@@ -123,7 +186,7 @@ function readClock(systemDateAndTime) {
  * that supports only Profile S with no PTZ and no Imaging must still connect.
  */
 export async function connectDevice({ host, port, username, password }) {
-  const safeHost = assertSafeHost(host);
+  const safeHost = await resolveSafeHost(host);
   const cam = await connectCam({ host: safeHost, port, username, password });
   const ctx = { host: safeHost, port };
 
