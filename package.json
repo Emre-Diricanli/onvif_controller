@@ -1,0 +1,17 @@
+{
+  "name": "onvif-controller",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local web app to connect to an ONVIF camera and control it with a live stream.",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "onvif": "^0.6.7",
+    "ws": "^8.18.0"
+  }
+}
