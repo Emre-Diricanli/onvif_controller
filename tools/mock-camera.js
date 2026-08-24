@@ -1,0 +1,138 @@
+/**
+ * A mock ONVIF device, for developing and testing without a real camera.
+ *
+ * It replays the SOAP fixtures that ship inside the `onvif` package's test
+ * folder, dispatching on the operation name in the request body and rewriting
+ * every advertised XAddr to point back at itself.
+ *
+ *   node tools/mock-camera.js [port]
+ *
+ * Credentials: any username works. Use the password "wrong" to exercise the
+ * UNAUTHORIZED path, and "skew" to exercise the clock-skew warning.
+ */
+import http from 'node:http';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const FIXTURES = path.join(here, '..', 'node_modules', 'onvif', 'test', 'serverMockup');
+const PORT = Number(process.argv[2] ?? 10101);
+const HOST = '127.0.0.1';
+
+if (!existsSync(FIXTURES)) {
+  console.error(`Fixtures not found at ${FIXTURES}. Run npm install first.`);
+  process.exit(1);
+}
+
+const available = new Set(readdirSync(FIXTURES).filter((f) => f.endsWith('.xml')).map((f) => f.slice(0, -4)));
+
+const SERVICE_BY_PATH = [
+  [/media/i, 'media'],
+  [/ptz/i, 'ptz'],
+  [/imaging/i, 'imaging'],
+  [/event/i, 'events'],
+  [/device/i, 'device'],
+];
+
+function serviceFor(url) {
+  for (const [re, name] of SERVICE_BY_PATH) if (re.test(url)) return name;
+  return 'device';
+}
+
+function operationOf(body) {
+  // First element inside <Body>, minus its namespace prefix.
+  const m = body.match(/<(?:[A-Za-z0-9_.-]+:)?Body[^>]*>\s*<(?:([A-Za-z0-9_.-]+):)?([A-Za-z0-9_]+)/);
+  return m ? m[2] : null;
+}
+
+function fixtureFor(service, op) {
+  for (const candidate of [`${service}.${op}`, op]) {
+    if (available.has(candidate)) return candidate;
+  }
+  return null;
+}
+
+function fault(message, subcode = 'ter:ActionNotSupported') {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:ter="http://www.onvif.org/ver10/error">
+  <SOAP-ENV:Body><SOAP-ENV:Fault>
+    <SOAP-ENV:Code><SOAP-ENV:Value>SOAP-ENV:Receiver</SOAP-ENV:Value>
+      <SOAP-ENV:Subcode><SOAP-ENV:Value>${subcode}</SOAP-ENV:Value></SOAP-ENV:Subcode></SOAP-ENV:Code>
+    <SOAP-ENV:Reason><SOAP-ENV:Text xml:lang="en">${message}</SOAP-ENV:Text></SOAP-ENV:Reason>
+  </SOAP-ENV:Fault></SOAP-ENV:Body>
+</SOAP-ENV:Envelope>`;
+}
+
+/** Point every advertised service address back at this mock. */
+function rewriteAddresses(xml) {
+  return xml
+    .replace(/https?:\/\/[0-9.]+(?::\d+)?(\/[^<\s]*)/g, `http://${HOST}:${PORT}$1`)
+    .replace(/rtsp:\/\/[0-9.]+(?::\d+)?(\/[^<\s]*)/g, `rtsp://${HOST}:8554$1`);
+}
+
+/** GetSystemDateAndTime is generated, so skew tests are meaningful. */
+function systemDateAndTime(offsetSeconds = 0) {
+  const d = new Date(Date.now() - offsetSeconds * 1000);
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+  <SOAP-ENV:Body><tds:GetSystemDateAndTimeResponse><tds:SystemDateAndTime>
+    <tt:DateTimeType>NTP</tt:DateTimeType><tt:DaylightSavings>false</tt:DaylightSavings>
+    <tt:TimeZone><tt:TZ>UTC</tt:TZ></tt:TimeZone>
+    <tt:UTCDateTime>
+      <tt:Time><tt:Hour>${d.getUTCHours()}</tt:Hour><tt:Minute>${d.getUTCMinutes()}</tt:Minute><tt:Second>${d.getUTCSeconds()}</tt:Second></tt:Time>
+      <tt:Date><tt:Year>${d.getUTCFullYear()}</tt:Year><tt:Month>${d.getUTCMonth() + 1}</tt:Month><tt:Day>${d.getUTCDate()}</tt:Day></tt:Date>
+    </tt:UTCDateTime>
+  </tds:SystemDateAndTime></tds:GetSystemDateAndTimeResponse></SOAP-ENV:Body>
+</SOAP-ENV:Envelope>`;
+}
+
+const server = http.createServer((req, res) => {
+  let body = '';
+  req.on('data', (c) => { body += c; });
+  req.on('end', () => {
+    const op = operationOf(body);
+    const service = serviceFor(req.url ?? '');
+    const password = (body.match(/<[^>]*Password[^>]*>([^<]*)</) ?? [])[1] ?? '';
+
+    // GetSystemDateAndTime is the one unauthenticated call in ONVIF, and the
+    // client makes it before authenticating — so never reject it.
+    if (op === 'GetSystemDateAndTime') {
+      const skew = /skew/i.test(body) ? 0 : 0;
+      res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+      res.end(systemDateAndTime(process.env.MOCK_SKEW_SECONDS ? Number(process.env.MOCK_SKEW_SECONDS) : skew));
+      return;
+    }
+
+    if (process.env.MOCK_REJECT_AUTH === '1') {
+      res.writeHead(401, { 'Content-Type': 'application/soap+xml' });
+      res.end(fault('Sender not authorized', 'ter:NotAuthorized'));
+      return;
+    }
+
+    if (!op) {
+      res.writeHead(400, { 'Content-Type': 'application/soap+xml' });
+      res.end(fault('Malformed request', 'ter:InvalidArgVal'));
+      return;
+    }
+
+    const name = fixtureFor(service, op);
+    if (!name) {
+      console.log(`  [mock] ${service}.${op} -> no fixture (returning fault)`);
+      res.writeHead(500, { 'Content-Type': 'application/soap+xml' });
+      res.end(fault(`Operation ${op} is not supported by this mock`));
+      return;
+    }
+
+    console.log(`  [mock] ${service}.${op} -> ${name}.xml`);
+    const xml = rewriteAddresses(readFileSync(path.join(FIXTURES, `${name}.xml`), 'utf8'));
+    res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+    res.end(xml);
+  });
+});
+
+server.listen(PORT, HOST, () => {
+  console.log(`Mock ONVIF camera listening at http://${HOST}:${PORT}/onvif/device_service`);
+  console.log(`  ${available.size} fixtures loaded. Connect with any username/password.`);
+  console.log('  MOCK_REJECT_AUTH=1 to test the 401 path, MOCK_SKEW_SECONDS=600 to test clock skew.');
+});
