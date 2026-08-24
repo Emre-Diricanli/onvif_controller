@@ -69,7 +69,51 @@ function normalizeMessage(raw) {
  * added and renews the subscription internally, so the job here is normalizing
  * the payloads and reporting subscription health honestly to the UI.
  */
+
+/**
+ * Stop the `onvif` library from killing the process.
+ *
+ * On a failed PullMessages the library calls `this.unsubscribe({}, cb)` from
+ * inside its own event loop (events.js ~385). If the subscription was already
+ * torn down, `Cam.unsubscribe` throws SYNCHRONOUSLY — from a callback, with no
+ * promise and no try/catch anywhere above it — so it surfaces as an uncaught
+ * exception and takes the whole server down mid-stream. Budget cameras whose
+ * pull-point subscriptions lapse hit this routinely.
+ *
+ * Guard the method on the instance so the throw never happens. Also normalize
+ * the library's own inconsistent call shape: it documents `unsubscribe(cb)` but
+ * calls it as `unsubscribe({}, cb)`.
+ */
+export function guardUnsubscribe(cam) {
+  if (!cam || cam.__unsubscribeGuarded) return;
+  const original = cam.unsubscribe;
+
+  cam.unsubscribe = function guardedUnsubscribe(...args) {
+    const callback = args.find((a) => typeof a === 'function');
+    const done = (err) => {
+      if (typeof callback === 'function') {
+        try { callback.call(this, err ?? null, null, null); } catch { /* the library's own callback threw */ }
+      }
+    };
+
+    if (!this.events?.subscription?.subscriptionReference?.address) {
+      done(null);   // nothing to unsubscribe from; this is not an error
+      return;
+    }
+    try {
+      return original.apply(this, args);
+    } catch (err) {
+      done(err);
+      return undefined;
+    }
+  };
+
+  cam.__unsubscribeGuarded = true;
+}
+
 export function attachEvents(session) {
+  guardUnsubscribe(session.cam);
+
   const bus = session.events instanceof EventEmitter ? session.events : new EventEmitter();
   bus.setMaxListeners(50);
   if (session.eventsAttached) return bus;

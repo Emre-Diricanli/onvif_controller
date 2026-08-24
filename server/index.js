@@ -130,6 +130,24 @@ function shutdown(signal) {
   // backstop for a hung socket keeping the process alive.
   setTimeout(() => process.exit(0), 3000).unref();
 }
+/**
+ * Last-resort safety net.
+ *
+ * The `onvif` library throws synchronously from inside its own async callbacks
+ * (its event pull loop is the known offender), which no caller can catch. A
+ * camera hiccup must not take down an operator's live view and every other
+ * session on this server, so log loudly and keep serving rather than exiting.
+ *
+ * This deliberately does NOT swallow the error quietly: an unexpected throw is
+ * still a defect worth seeing in the log.
+ */
+process.on('uncaughtException', (err) => {
+  console.error('[uncaught] Continuing after an unhandled error:', err?.stack ?? err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandled rejection]', reason?.stack ?? reason);
+});
+
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 

@@ -98,6 +98,24 @@ camera, everything else still runs):
 SMOKE_REAL_FFMPEG=1 node tools/smoke.mjs
 ```
 
+## Known device quirks
+
+Not every camera that advertises an ONVIF service actually implements it. Two
+real cases this app now handles explicitly rather than failing confusingly:
+
+- **Imaging that never applies.** Some budget cameras report adjustable ranges,
+  answer `SetImagingSettings` with a success envelope, and keep their own
+  values. Verified on a Vatilon "Sinis 5MP IPC" against five different SOAP
+  shapes — all ignored. The Imaging section detects this and says so instead of
+  repeating a per-slider error; the fix is the camera's own app, not this one.
+- **An event subscription that kills the process.** The `onvif` library calls
+  `unsubscribe()` from inside its own PullMessages error path and throws
+  synchronously when the subscription has already lapsed. Because it throws from
+  a callback, nothing upstream can catch it, and it terminated the whole server
+  mid-stream. `server/onvif/events.js` guards the method on each instance, and
+  `server/index.js` keeps a last-resort `uncaughtException` handler so no
+  third-party throw can end an operator's live view.
+
 ## Documents
 
 - `SPEC.md` — product and design contract, including the motion system

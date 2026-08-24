@@ -430,6 +430,43 @@ async function main() {
     }
   }
 
+
+  console.log('\nCrash resistance (onvif library throws from its own event loop)');
+  {
+    // The library calls unsubscribe({}, cb) from inside its PullMessages error
+    // path. With no live subscription it throws SYNCHRONOUSLY from a callback,
+    // which is uncatchable by any caller and killed the whole server mid-stream
+    // on a real camera. Reproduce it, then prove the guard neutralizes it.
+    const onvifMod = (await import('onvif')).default;
+    const { guardUnsubscribe } = await import('../server/onvif/events.js');
+
+    // Exercise the real Cam.prototype.unsubscribe against a bare object rather
+    // than a live Cam: constructing a real one makes the library start its pull
+    // loop and hit the network, which is not what this test is about.
+    const cam = Object.create(onvifMod.Cam.prototype);
+    cam.events = {};   // the crash precondition: subscription already gone
+
+    let unguardedThrew = false;
+    try { cam.unsubscribe({}, () => {}); } catch (err) {
+      unguardedThrew = /pull-point subscription first/.test(String(err?.message));
+    }
+    check('the library really does throw here (guard is still needed)', unguardedThrew,
+      'if this fails the upstream bug was fixed and the guard can be revisited');
+
+    guardUnsubscribe(cam);
+
+    let guardedThrew = false;
+    let callbackRan = false;
+    try { cam.unsubscribe({}, () => { callbackRan = true; }); } catch { guardedThrew = true; }
+    check('guarded unsubscribe does not throw', !guardedThrew);
+    check('guarded unsubscribe still invokes the callback', callbackRan,
+      'the library loops on this callback; swallowing it would stall the event loop');
+
+    let bareThrew = false;
+    try { cam.unsubscribe(); } catch { bareThrew = true; }
+    check('guarded unsubscribe handles the bare call shape too', !bareThrew);
+  }
+
   console.log('\nStatic assets');
   for (const asset of ['/', '/js/app.js', '/js/player.js', '/js/spring.js', '/styles/tokens.css', '/styles/app.css', '/styles/player.css', '/styles/imaging.css']) {
     const res = await fetch(`${BASE}${asset}`);

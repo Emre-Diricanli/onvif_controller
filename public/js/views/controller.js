@@ -16,6 +16,7 @@ import { renderPresets } from './presets.js';
 import { renderImaging } from './imaging.js';
 import { renderEvents } from './events.js';
 import { renderStreamUrls } from './streamurls.js';
+import { renderNetwork } from './network.js';
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -491,6 +492,13 @@ export function renderController(root, { session, onDisconnect }) {
       name: 'Device',
       available: () => true,
       build: (c) => renderDevice(c, { sessionId: session.sessionId, onError: showError }),
+    },
+    {
+      name: 'Network',
+      // Every ONVIF device answers the device service; the view itself reports
+      // when a particular camera exposes nothing writable.
+      available: () => true,
+      build: (c) => renderNetwork(c, { sessionId: session.sessionId, onError: showError }),
     },
     {
       name: 'Capabilities',
