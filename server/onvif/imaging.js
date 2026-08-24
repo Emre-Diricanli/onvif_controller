@@ -4,9 +4,36 @@ import { callCam, tryCam, asArray, num } from './util.js';
 const SCHEMA = 'http://www.onvif.org/ver10/schema';
 const IMG20 = 'http://www.onvif.org/ver20/imaging/wsdl';
 
+/**
+ * Resolve the video source token the Imaging service will actually accept.
+ *
+ * The profile's `videoSourceConfiguration.sourceToken` is NOT reliable. A real
+ * Hikvision camera here reports the literal placeholder string
+ * "videoSourceToken", and addressing that token makes the camera answer
+ * GetImagingSettings with a generic default (128 on every channel) and accept
+ * SetImagingSettings with an empty success response while changing nothing —
+ * a silent no-op that looks exactly like a refused write.
+ *
+ * So validate against the real source list from GetVideoSources, and only fall
+ * back to the profile's claim when the device offers nothing better.
+ */
+function realSourceTokens(session) {
+  return asArray(session.cam?.videoSources)
+    .map((v) => v?.$?.token ?? v?.token)
+    .filter((t) => typeof t === 'string' && t.length > 0);
+}
+
 function sourceTokenFor(session, profileToken) {
   const profile = session.profileMap.get(profileToken);
-  return profile?.videoSourceToken ?? session.cam?.activeSource?.sourceToken ?? null;
+  const claimed = profile?.videoSourceToken ?? null;
+  const real = realSourceTokens(session);
+  const active = session.cam?.activeSource?.sourceToken ?? null;
+
+  // Trust the profile only if the device actually lists that source.
+  if (claimed && real.includes(claimed)) return claimed;
+  if (active && real.includes(active)) return active;
+  if (real.length > 0) return real[0];
+  return claimed ?? active ?? null;
 }
 
 function range(node) {
@@ -110,7 +137,14 @@ function readOptions(o) {
   return out;
 }
 
+/** The library populates cam.videoSources during connect; refetch if it did not. */
+async function ensureVideoSources(session) {
+  if (realSourceTokens(session).length > 0) return;
+  await tryCam(session.cam, 'getVideoSources', undefined, null, { ctx: session.ctx });
+}
+
 export async function readImaging(session, profileToken) {
+  await ensureVideoSources(session);
   const token = sourceTokenFor(session, profileToken);
   if (!token) {
     throw new AppError('UNSUPPORTED', 'This profile has no video source to read imaging settings from.');
@@ -119,6 +153,14 @@ export async function readImaging(session, profileToken) {
     callCam(session.cam, 'getImagingSettings', { token }, { ctx: session.ctx }),
     tryCam(session.cam, 'getVideoSourceOptions', { token }, null, { ctx: session.ctx }),
   ]);
+  if (process.env.DEBUG_ONVIF) {
+    // The video source token is the usual suspect when a camera accepts an
+    // imaging write and silently ignores it, so make it visible.
+    console.log('[onvif imaging] videoSourceToken used:', JSON.stringify(token),
+      '| device sources:', JSON.stringify(realSourceTokens(session)),
+      '| profile claimed:', JSON.stringify(session.profileMap.get(profileToken)?.videoSourceToken ?? null));
+    console.log('[onvif imaging] GetImagingSettings raw:', safeTrace(JSON.stringify(settings)));
+  }
   return { settings: readSettings(settings), options: readOptions(options) };
 }
 
@@ -253,6 +295,7 @@ function reportedPatch(patch, current) {
 }
 
 export async function writeImaging(session, profileToken, patch) {
+  await ensureVideoSources(session);
   const token = sourceTokenFor(session, profileToken);
   if (!token) throw new AppError('UNSUPPORTED', 'This profile has no video source to write imaging settings to.');
 
@@ -297,6 +340,7 @@ export async function writeImaging(session, profileToken, patch) {
 }
 
 export async function focusMove(session, profileToken, { action, speed, position }) {
+  await ensureVideoSources(session);
   const token = sourceTokenFor(session, profileToken);
   if (!token) throw new AppError('UNSUPPORTED', 'This profile has no video source to focus.');
 

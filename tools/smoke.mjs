@@ -356,7 +356,9 @@ async function main() {
       let alive = '';
       try {
         const { execSync } = await import('node:child_process');
-        alive = execSync('pgrep -fl "fake-ffmpeg|ffmpeg.*movflags" || true', { encoding: 'utf8' }).trim();
+        // Match only this run's shim, never an unrelated ffmpeg the operator
+        // has streaming from a real camera on the same machine.
+        alive = execSync('pgrep -fl "fake-ffmpeg" || true', { encoding: 'utf8' }).trim();
       } catch { /* nothing matched */ }
       check('stopping the stream kills its ffmpeg', alive === '', alive.slice(0, 200));
     }
@@ -421,7 +423,9 @@ async function main() {
   const { execSync } = await import('node:child_process');
   let orphans = '';
   try {
-    orphans = execSync('pgrep -fl "ffmpeg.*rtsp" || true', { encoding: 'utf8' }).trim();
+    // Scoped to the mock's own RTSP endpoint: a real camera stream running in
+    // another process on this machine is not this test's business.
+    orphans = execSync(`pgrep -fl "fake-ffmpeg|rtsp://[^ ]*127.0.0.1:8554" || true`, { encoding: 'utf8' }).trim();
   } catch { /* pgrep exits 1 when nothing matches */ }
   check('no orphaned ffmpeg processes', orphans === '', orphans.slice(0, 200));
 
