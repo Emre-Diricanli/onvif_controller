@@ -36,44 +36,35 @@ function readSettings(s) {
   if (s.irCutFilter !== undefined) out.irCutFilter = String(s.irCutFilter).toUpperCase();
 
   if (s.whiteBalance) {
-    out.whiteBalance = {
-      mode: String(s.whiteBalance.mode ?? 'AUTO').toUpperCase(),
-      crGain: num(s.whiteBalance.crGain),
-      cbGain: num(s.whiteBalance.cbGain),
-    };
+    out.whiteBalance = {};
+    if (s.whiteBalance.mode !== undefined) out.whiteBalance.mode = String(s.whiteBalance.mode).toUpperCase();
+    if (s.whiteBalance.crGain !== undefined) out.whiteBalance.crGain = num(s.whiteBalance.crGain);
+    if (s.whiteBalance.cbGain !== undefined) out.whiteBalance.cbGain = num(s.whiteBalance.cbGain);
   }
   if (s.exposure) {
-    out.exposure = {
-      mode: String(s.exposure.mode ?? 'AUTO').toUpperCase(),
-      priority: s.exposure.priority ? String(s.exposure.priority) : null,
-      minExposureTime: num(s.exposure.minExposureTime),
-      maxExposureTime: num(s.exposure.maxExposureTime),
-      minGain: num(s.exposure.minGain),
-      maxGain: num(s.exposure.maxGain),
-      exposureTime: num(s.exposure.exposureTime),
-      gain: num(s.exposure.gain),
-      iris: num(s.exposure.iris),
-    };
+    out.exposure = {};
+    for (const key of ['minExposureTime', 'maxExposureTime', 'minGain', 'maxGain', 'exposureTime', 'gain', 'iris']) {
+      if (s.exposure[key] !== undefined) out.exposure[key] = num(s.exposure[key]);
+    }
+    if (s.exposure.mode !== undefined) out.exposure.mode = String(s.exposure.mode).toUpperCase();
+    if (s.exposure.priority !== undefined) out.exposure.priority = String(s.exposure.priority);
   }
   if (s.focus) {
-    out.focus = {
-      autoFocusMode: String(s.focus.autoFocusMode ?? 'AUTO').toUpperCase(),
-      defaultSpeed: num(s.focus.defaultSpeed),
-      nearLimit: num(s.focus.nearLimit),
-      farLimit: num(s.focus.farLimit),
-    };
+    out.focus = {};
+    if (s.focus.autoFocusMode !== undefined) out.focus.autoFocusMode = String(s.focus.autoFocusMode).toUpperCase();
+    for (const key of ['defaultSpeed', 'nearLimit', 'farLimit']) {
+      if (s.focus[key] !== undefined) out.focus[key] = num(s.focus[key]);
+    }
   }
   if (s.wideDynamicRange) {
-    out.wideDynamicRange = {
-      mode: String(s.wideDynamicRange.mode ?? 'OFF').toUpperCase(),
-      level: num(s.wideDynamicRange.level, 0),
-    };
+    out.wideDynamicRange = {};
+    if (s.wideDynamicRange.mode !== undefined) out.wideDynamicRange.mode = String(s.wideDynamicRange.mode).toUpperCase();
+    if (s.wideDynamicRange.level !== undefined) out.wideDynamicRange.level = num(s.wideDynamicRange.level);
   }
   if (s.backlightCompensation) {
-    out.backlightCompensation = {
-      mode: String(s.backlightCompensation.mode ?? 'OFF').toUpperCase(),
-      level: num(s.backlightCompensation.level, 0),
-    };
+    out.backlightCompensation = {};
+    if (s.backlightCompensation.mode !== undefined) out.backlightCompensation.mode = String(s.backlightCompensation.mode).toUpperCase();
+    if (s.backlightCompensation.level !== undefined) out.backlightCompensation.level = num(s.backlightCompensation.level);
   }
   return out;
 }
@@ -146,22 +137,27 @@ const el = (name, value) => `<${name} xmlns="${SCHEMA}">${esc(value)}</${name}>`
  * order required by ImagingSettings20 — devices reject out-of-order children.
  */
 function buildImagingBody(token, patch, current) {
-  const merged = { ...current, ...patch };
+  const merged = { ...current };
+  for (const [key, value] of Object.entries(patch)) {
+    if (!Object.hasOwn(current, key)) continue;
+    merged[key] = value && typeof value === 'object' && !Array.isArray(value)
+      ? { ...(current[key] ?? {}), ...value }
+      : value;
+  }
   const parts = [];
 
-  const blc = patch.backlightCompensation ?? (patch.backlightCompensationLevel !== undefined ? merged.backlightCompensation : null);
+  const blc = merged.backlightCompensation;
   if (blc) {
-    parts.push(`<BacklightCompensation xmlns="${SCHEMA}">` +
-      el('Mode', String(blc.mode ?? 'OFF').toUpperCase()) +
-      (blc.level !== undefined && blc.level !== null ? el('Level', blc.level) : '') +
-      '</BacklightCompensation>');
+    const children = (blc.mode !== undefined && blc.mode !== null ? el('Mode', String(blc.mode).toUpperCase()) : '') +
+      (blc.level !== undefined && blc.level !== null ? el('Level', blc.level) : '');
+    if (children) parts.push(`<BacklightCompensation xmlns="${SCHEMA}">${children}</BacklightCompensation>`);
   }
-  if (patch.brightness !== undefined && patch.brightness !== null) parts.push(el('Brightness', patch.brightness));
-  if (patch.colorSaturation !== undefined && patch.colorSaturation !== null) parts.push(el('ColorSaturation', patch.colorSaturation));
-  if (patch.contrast !== undefined && patch.contrast !== null) parts.push(el('Contrast', patch.contrast));
+  if (merged.brightness !== undefined && merged.brightness !== null) parts.push(el('Brightness', merged.brightness));
+  if (merged.colorSaturation !== undefined && merged.colorSaturation !== null) parts.push(el('ColorSaturation', merged.colorSaturation));
+  if (merged.contrast !== undefined && merged.contrast !== null) parts.push(el('Contrast', merged.contrast));
 
-  if (patch.exposure) {
-    const e = patch.exposure;
+  if (merged.exposure) {
+    const e = merged.exposure;
     const seq = [
       ['Mode', e.mode], ['Priority', e.priority],
       ['MinExposureTime', e.minExposureTime], ['MaxExposureTime', e.maxExposureTime],
@@ -172,8 +168,8 @@ function buildImagingBody(token, patch, current) {
       parts.push(`<Exposure xmlns="${SCHEMA}">` + seq.map(([k, v]) => el(k, v)).join('') + '</Exposure>');
     }
   }
-  if (patch.focus) {
-    const f = patch.focus;
+  if (merged.focus) {
+    const f = merged.focus;
     const seq = [
       ['AutoFocusMode', f.autoFocusMode], ['DefaultSpeed', f.defaultSpeed],
       ['NearLimit', f.nearLimit], ['FarLimit', f.farLimit],
@@ -182,23 +178,21 @@ function buildImagingBody(token, patch, current) {
       parts.push(`<Focus xmlns="${SCHEMA}">` + seq.map(([k, v]) => el(k, v)).join('') + '</Focus>');
     }
   }
-  if (patch.irCutFilter) parts.push(el('IrCutFilter', String(patch.irCutFilter).toUpperCase()));
-  if (patch.sharpness !== undefined && patch.sharpness !== null) parts.push(el('Sharpness', patch.sharpness));
+  if (merged.irCutFilter !== undefined && merged.irCutFilter !== null) parts.push(el('IrCutFilter', String(merged.irCutFilter).toUpperCase()));
+  if (merged.sharpness !== undefined && merged.sharpness !== null) parts.push(el('Sharpness', merged.sharpness));
 
-  if (patch.wideDynamicRange) {
-    const w = patch.wideDynamicRange;
-    parts.push(`<WideDynamicRange xmlns="${SCHEMA}">` +
-      el('Mode', String(w.mode ?? 'OFF').toUpperCase()) +
-      (w.level !== undefined && w.level !== null ? el('Level', w.level) : '') +
-      '</WideDynamicRange>');
+  if (merged.wideDynamicRange) {
+    const w = merged.wideDynamicRange;
+    const children = (w.mode !== undefined && w.mode !== null ? el('Mode', String(w.mode).toUpperCase()) : '') +
+      (w.level !== undefined && w.level !== null ? el('Level', w.level) : '');
+    if (children) parts.push(`<WideDynamicRange xmlns="${SCHEMA}">${children}</WideDynamicRange>`);
   }
-  if (patch.whiteBalance) {
-    const w = patch.whiteBalance;
-    parts.push(`<WhiteBalance xmlns="${SCHEMA}">` +
-      el('Mode', String(w.mode ?? 'AUTO').toUpperCase()) +
+  if (merged.whiteBalance) {
+    const w = merged.whiteBalance;
+    const children = (w.mode !== undefined && w.mode !== null ? el('Mode', String(w.mode).toUpperCase()) : '') +
       (w.crGain !== undefined && w.crGain !== null ? el('CrGain', w.crGain) : '') +
-      (w.cbGain !== undefined && w.cbGain !== null ? el('CbGain', w.cbGain) : '') +
-      '</WhiteBalance>');
+      (w.cbGain !== undefined && w.cbGain !== null ? el('CbGain', w.cbGain) : '');
+    if (children) parts.push(`<WhiteBalance xmlns="${SCHEMA}">${children}</WhiteBalance>`);
   }
 
   if (!parts.length) return null;
@@ -218,12 +212,12 @@ function rawRequest(cam, service, body, timeoutMs) {
       reject(new AppError('DEVICE_TIMEOUT', 'The device did not answer the imaging request in time.'));
     }, timeoutMs);
     try {
-      cam._request({ service, body: cam._envelopeHeader() + body + cam._envelopeFooter() }, (err, data) => {
+      cam._request({ service, body: cam._envelopeHeader() + body + cam._envelopeFooter() }, (err, data, xml) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         if (err) reject(err);
-        else resolve(data);
+        else resolve({ data, xml });
       });
     } catch (err) {
       if (settled) return;
@@ -234,23 +228,72 @@ function rawRequest(cam, service, body, timeoutMs) {
   });
 }
 
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const same = (a, b) => String(a).toUpperCase() === String(b).toUpperCase();
+
+function safeTrace(value) {
+  return String(value ?? '')
+    .replace(/(<(?:\w+:)?Password\b[^>]*>)[\s\S]*?(<\/(?:\w+:)?Password>)/gi, '$1[REDACTED]$2')
+    .replace(/rtsp:\/\/[^\s<"']+/gi, 'rtsp://[REDACTED]');
+}
+
+function reportedPatch(patch, current) {
+  const out = {};
+  for (const [key, value] of Object.entries(patch)) {
+    if (!Object.hasOwn(current, key)) continue;
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const reportedChildren = current[key] && typeof current[key] === 'object' ? current[key] : {};
+      const children = Object.fromEntries(Object.entries(value).filter(([child]) => Object.hasOwn(reportedChildren, child)));
+      if (Object.keys(children).length) out[key] = children;
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
 export async function writeImaging(session, profileToken, patch) {
   const token = sourceTokenFor(session, profileToken);
   if (!token) throw new AppError('UNSUPPORTED', 'This profile has no video source to write imaging settings to.');
 
   const before = await readImaging(session, profileToken);
-  const body = buildImagingBody(token, patch, before.settings);
+  const effectivePatch = reportedPatch(patch, before.settings);
+  if (Object.keys(effectivePatch).length === 0) throw new AppError('BAD_REQUEST', 'No recognized imaging settings were supplied.');
+  const body = buildImagingBody(token, effectivePatch, before.settings);
   if (!body) throw new AppError('BAD_REQUEST', 'No recognized imaging settings were supplied.');
 
   const { mapOnvifError } = await import('../errors.js');
   try {
-    await rawRequest(session.cam, 'imaging', body, session.timeoutMs);
+    if (process.env.DEBUG_ONVIF) console.log('[onvif imaging] SetImagingSettings request:', safeTrace(body));
+    const response = await rawRequest(session.cam, 'imaging', body, session.timeoutMs);
+    if (process.env.DEBUG_ONVIF) console.log('[onvif imaging] SetImagingSettings response:', safeTrace(response.xml ?? response.data));
   } catch (err) {
     throw mapOnvifError(err, session.ctx);
   }
-  // Return the device's post-write state, not our optimistic guess: cameras
-  // clamp, quantize, and sometimes ignore values outright.
-  return readImaging(session, profileToken);
+  let after = before;
+  const patched = Object.entries(effectivePatch);
+  for (const delayMs of [150, 400, 900]) {
+    await wait(delayMs);
+    after = await readImaging(session, profileToken);
+    const settled = patched.every(([key, requested]) => {
+      const actual = after.settings[key];
+      const old = before.settings[key];
+      if (requested && typeof requested === 'object') {
+        return Object.entries(requested).every(([subkey, value]) => same(actual?.[subkey], value) || !same(actual?.[subkey], old?.[subkey]));
+      }
+      return same(actual, requested) || !same(actual, old);
+    });
+    if (settled) break;
+  }
+  after.applied = Object.fromEntries(patched.map(([key, requested]) => {
+    const actual = after.settings[key];
+    const old = before.settings[key];
+    const accepted = requested && typeof requested === 'object'
+      ? Object.entries(requested).every(([subkey, value]) => same(actual?.[subkey], value) || !same(actual?.[subkey], old?.[subkey]))
+      : same(actual, requested) || !same(actual, old);
+    return [key, accepted];
+  }));
+  return after;
 }
 
 export async function focusMove(session, profileToken, { action, speed, position }) {

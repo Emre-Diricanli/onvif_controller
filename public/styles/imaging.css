@@ -1,0 +1,24 @@
+.imaging-control-message {
+  min-height: 1.15em;
+  margin: 0.35rem 0 0;
+  color: var(--color-danger, #ff6b6b);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.imaging-control-message:empty {
+  display: none;
+}
+
+.imaging-control-refused .slider,
+.imaging-control-refused .segmented {
+  outline: 2px solid color-mix(in srgb, var(--color-danger, #ff6b6b) 65%, transparent);
+  outline-offset: 3px;
+}
+
+@media (prefers-contrast: more) {
+  .imaging-control-refused .slider,
+  .imaging-control-refused .segmented {
+    outline-width: 3px;
+  }
+}

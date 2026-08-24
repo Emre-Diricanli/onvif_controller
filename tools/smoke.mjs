@@ -177,6 +177,43 @@ async function main() {
     check('imaging returns options', typeof imagingBody.options === 'object');
     const hasRange = Object.values(imagingBody.options ?? {}).some((v) => v && typeof v === 'object' && 'min' in v);
     check('imaging options carry device ranges', hasRange, 'sliders must not hardcode 0-100');
+
+    const write = await fetch(`${BASE}/api/session/${id}/imaging`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile, settings: { brightness: 200 } }),
+    });
+    const writeBody = await write.json();
+    check('default imaging write returns 200', write.status === 200, JSON.stringify(writeBody).slice(0, 200));
+    check('default imaging write is confirmed applied', writeBody.applied?.brightness === true, JSON.stringify(writeBody));
+    check('default imaging write is read back from camera', writeBody.settings?.brightness === 200, JSON.stringify(writeBody));
+    const imagingCalls = await fetch(`http://127.0.0.1:${MOCK_PORT}/__calls`).then((r) => r.json());
+    check('SetImagingSettings sends every previously reported field', imagingCalls.imagingFullBlock === true, JSON.stringify(imagingCalls));
+
+    async function exerciseImagingMode(mode, port, requested, expected, expectedApplied) {
+      start(`mock-${mode}`, ['tools/mock-camera.js', String(port)], { MOCK_IMAGING_MODE: mode });
+      await delay(500);
+      const connected = await fetch(`${BASE}/api/connect`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: '127.0.0.1', port, username: 'admin', password: 'admin' }),
+      });
+      const connectedBody = await connected.json();
+      check(`${mode} camera connects`, connected.status === 200, JSON.stringify(connectedBody).slice(0, 160));
+      const modeProfile = connectedBody.profiles?.[0]?.token;
+      const result = await fetch(`${BASE}/api/session/${connectedBody.sessionId}/imaging`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile: modeProfile, settings: { brightness: requested } }),
+      });
+      const resultBody = await result.json();
+      check(`${mode} write returns 200`, result.status === 200, JSON.stringify(resultBody).slice(0, 180));
+      check(`${mode} write reports applied=${expectedApplied}`, resultBody.applied?.brightness === expectedApplied, JSON.stringify(resultBody));
+      check(`${mode} write reports device value ${expected}`, resultBody.settings?.brightness === expected, JSON.stringify(resultBody));
+      const received = await fetch(`http://127.0.0.1:${port}/__calls`).then((r) => r.json());
+      check(`${mode} write sends a full settings block`, received.imagingFullBlock === true, JSON.stringify(received));
+    }
+
+    await exerciseImagingMode('ignore', MOCK_PORT + 2, 100, 255, false);
+    await exerciseImagingMode('clamp', MOCK_PORT + 3, 250, 200, true);
   }
 
   console.log('\nDevice');
@@ -326,7 +363,7 @@ async function main() {
   }
 
   console.log('\nStatic assets');
-  for (const asset of ['/', '/js/app.js', '/js/player.js', '/js/spring.js', '/styles/tokens.css', '/styles/app.css', '/styles/player.css']) {
+  for (const asset of ['/', '/js/app.js', '/js/player.js', '/js/spring.js', '/styles/tokens.css', '/styles/app.css', '/styles/player.css', '/styles/imaging.css']) {
     const res = await fetch(`${BASE}${asset}`);
     check(`serves ${asset}`, res.ok, `got ${res.status}`);
   }

@@ -70,13 +70,11 @@ export function renderImaging(container, { sessionId, profile, onError }) {
   wrap.append(status, body);
   container.appendChild(wrap);
 
-  // key (JSON path string) -> { slider } for re-syncing from PATCH responses.
+  // Every control owns its presentation value until its newest write settles.
   const sliders = new Map();
   const segmented = new Map();
-  // Keys currently being dragged — their thumbs must stay 1:1 with the
-  // pointer, so server echoes never fight an active gesture.
-  const dragging = new Set();
   const debounceTimers = new Map();
+  const sequences = new Map();
 
   function reportError(err) {
     if (destroyed) return;
@@ -84,26 +82,33 @@ export function renderImaging(container, { sessionId, profile, onError }) {
   }
 
   function debouncedPatch(pathKey, settingsFragment) {
+    const sequence = (sequences.get(pathKey) ?? 0) + 1;
+    sequences.set(pathKey, sequence);
     if (debounceTimers.has(pathKey)) clearTimeout(debounceTimers.get(pathKey));
     debounceTimers.set(pathKey, setTimeout(() => {
       debounceTimers.delete(pathKey);
       api.patchImaging(sessionId, profile, settingsFragment)
-        .then((res) => { if (!destroyed) applyServerState(res); })
-        .catch(reportError);
+        .then((res) => { if (!destroyed && sequences.get(pathKey) === sequence) applyFieldState(pathKey, res); })
+        .catch((err) => { if (sequences.get(pathKey) === sequence) reportError(err); });
     }, DEBOUNCE_MS));
   }
 
-  function applyServerState(res) {
-    if (!res || !res.settings) return;
-    for (const [pathKey, entry] of sliders) {
-      if (dragging.has(pathKey)) continue;
-      const value = getPath(res.settings, entry.path);
-      if (value != null) entry.slider.value = String(value);
+  function applyFieldState(pathKey, res) {
+    if (!res?.settings) return;
+    const entry = sliders.get(pathKey) ?? segmented.get(pathKey);
+    if (!entry) return;
+    const value = getPath(res.settings, entry.path);
+    const applied = res.applied?.[entry.path[0]] !== false;
+    if (value != null) {
+      if (entry.slider) {
+        entry.slider.value = String(value);
+        entry.valueEl.textContent = String(value);
+      } else {
+        selectSegment(entry, String(value));
+      }
     }
-    for (const [pathKey, entry] of segmented) {
-      const value = getPath(res.settings, entry.path);
-      if (value != null) selectSegment(entry, String(value));
-    }
+    entry.message.textContent = applied ? '' : 'Camera refused this change. Restored the value reported by the device.';
+    entry.row.classList.toggle('imaging-control-refused', !applied);
   }
 
   function buildSlider(settings, options, key, label) {
@@ -122,28 +127,24 @@ export function renderImaging(container, { sessionId, profile, onError }) {
     slider.step = range.step != null ? String(range.step) : 'any';
     slider.value = String(value);
     slider.setAttribute('aria-label', label);
-    row.append(head, slider);
+    const message = el('p', 'imaging-control-message');
+    message.setAttribute('aria-live', 'polite');
+    row.append(head, slider, message);
 
-    const entry = { slider, path: [key], valueEl: head.lastChild };
+    const entry = { slider, path: [key], valueEl: head.lastChild, message, row };
     sliders.set(pathKey, entry);
 
     const onInput = () => {
       entry.valueEl.textContent = slider.value;
+      entry.message.textContent = '';
+      entry.row.classList.remove('imaging-control-refused');
       const fragment = {};
       setPath(fragment, [key], Number(slider.value));
       debouncedPatch(pathKey, fragment);
     };
-    const onDown = () => dragging.add(pathKey);
-    const onUp = () => dragging.delete(pathKey);
     slider.addEventListener('input', onInput);
-    slider.addEventListener('pointerdown', onDown);
-    slider.addEventListener('pointerup', onUp);
-    slider.addEventListener('pointercancel', onUp);
     cleanups.push(() => {
       slider.removeEventListener('input', onInput);
-      slider.removeEventListener('pointerdown', onDown);
-      slider.removeEventListener('pointerup', onUp);
-      slider.removeEventListener('pointercancel', onUp);
     });
     return row;
   }
@@ -168,7 +169,9 @@ export function renderImaging(container, { sessionId, profile, onError }) {
     group.setAttribute('role', 'group');
     group.setAttribute('aria-label', label);
 
-    const entry = { path, buttons: [] };
+    const message = el('p', 'imaging-control-message');
+    message.setAttribute('aria-live', 'polite');
+    const entry = { path, buttons: [], message, row };
     segmented.set(pathKey, entry);
 
     for (const choice of choices) {
@@ -183,9 +186,13 @@ export function renderImaging(container, { sessionId, profile, onError }) {
         for (const [b] of entry.buttons) b.disabled = true;
         const fragment = {};
         setPath(fragment, path, choice);
+        const sequence = (sequences.get(pathKey) ?? 0) + 1;
+        sequences.set(pathKey, sequence);
+        entry.message.textContent = '';
+        row.classList.remove('imaging-control-refused');
         api.patchImaging(sessionId, profile, fragment)
-          .then((res) => { if (!destroyed) applyServerState(res); })
-          .catch(reportError)
+          .then((res) => { if (!destroyed && sequences.get(pathKey) === sequence) applyFieldState(pathKey, res); })
+          .catch((err) => { if (sequences.get(pathKey) === sequence) reportError(err); })
           .finally(() => {
             if (destroyed) return;
             group.classList.remove('segmented-busy');
@@ -197,7 +204,7 @@ export function renderImaging(container, { sessionId, profile, onError }) {
       group.appendChild(btn);
     }
     selectSegment(entry, String(current));
-    row.appendChild(group);
+    row.append(group, message);
     return row;
   }
 

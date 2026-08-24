@@ -19,6 +19,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(here, '..', 'node_modules', 'onvif', 'test', 'serverMockup');
 const PORT = Number(process.argv[2] ?? 10101);
 const HOST = '127.0.0.1';
+const IMAGING_MODE = process.env.MOCK_IMAGING_MODE ?? 'default';
 
 if (!existsSync(FIXTURES)) {
   console.error(`Fixtures not found at ${FIXTURES}. Run npm install first.`);
@@ -111,6 +112,23 @@ function systemDateAndTime(offsetSeconds = 0) {
 
 /** Per-operation call counts, so tests can assert what the camera actually received. */
 const callCounts = Object.create(null);
+const imagingState = { Brightness: 255, ColorSaturation: 128, Contrast: 128, Sharpness: 128 };
+const ORIGINAL_IMAGING = { ...imagingState };
+const REPORTED_IMAGING_FIELDS = ['Brightness', 'ColorSaturation', 'Contrast', 'Focus', 'Sharpness'];
+
+function imagingSettingsResponse() {
+  const name = fixtureFor('imaging', 'GetImagingSettings');
+  let xml = rewriteAddresses(readFileSync(path.join(FIXTURES, `${name}.xml`), 'utf8'));
+  for (const [field, value] of Object.entries(imagingState)) {
+    xml = xml.replace(new RegExp(`(<tt:${field}>)[^<]*(</tt:${field}>)`), `$1${value}$2`);
+  }
+  return xml;
+}
+
+function valueIn(xml, name) {
+  const match = xml.match(new RegExp(`<(?:[A-Za-z0-9_.-]+:)?${name}(?:\\s[^>]*)?>([^<]+)</(?:[A-Za-z0-9_.-]+:)?${name}>`, 'i'));
+  return match ? Number(match[1]) : null;
+}
 
 const server = http.createServer((req, res) => {
   // Test introspection endpoint. Not part of ONVIF; it exists so the smoke
@@ -154,6 +172,33 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+    if (service === 'imaging' && op === 'GetImagingSettings') {
+      res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+      res.end(imagingSettingsResponse());
+      return;
+    }
+
+    if (service === 'imaging' && op === 'SetImagingSettings') {
+      const settingsBlock = body.match(/<(?:\w+:)?ImagingSettings\b[^>]*>([\s\S]*?)<\/(?:\w+:)?ImagingSettings>/i)?.[1] ?? '';
+      callCounts.imagingFullBlock = REPORTED_IMAGING_FIELDS.every((field) =>
+        new RegExp(`<(?:[A-Za-z0-9_.-]+:)?${field}(?:\\s|>)`, 'i').test(settingsBlock));
+      if (IMAGING_MODE !== 'ignore') {
+        for (const field of Object.keys(imagingState)) {
+          const requested = valueIn(settingsBlock, field);
+          if (requested !== null) imagingState[field] = IMAGING_MODE === 'clamp' && field === 'Brightness'
+            ? Math.min(requested, 200)
+            : requested;
+        }
+      } else {
+        Object.assign(imagingState, ORIGINAL_IMAGING);
+      }
+      const name = fixtureFor(service, op);
+      const xml = rewriteAddresses(readFileSync(path.join(FIXTURES, `${name}.xml`), 'utf8'));
+      res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+      res.end(xml);
+      return;
+    }
+
     const name = fixtureFor(service, op);
     if (!name) {
       console.log(`  [mock] ${service}.${op} -> no fixture (returning fault)`);
@@ -173,4 +218,5 @@ server.listen(PORT, HOST, () => {
   console.log(`Mock ONVIF camera listening at http://${HOST}:${PORT}/onvif/device_service`);
   console.log(`  ${available.size} fixtures loaded. Connect with any username/password.`);
   console.log('  MOCK_REJECT_AUTH=1 to test the 401 path, MOCK_SKEW_SECONDS=600 to test clock skew.');
+  console.log(`  Imaging mode: ${IMAGING_MODE} (MOCK_IMAGING_MODE=ignore|clamp).`);
 });
