@@ -1,11 +1,15 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { config } from '../config.js';
+import { AppError } from '../errors.js';
 
 const streams = new Map();
 const children = new Set();
 const DEFAULT_MIME = 'video/mp4; codecs="avc1.42E01E"';
 const FAILURE_WINDOW_MS = 30_000;
+/** How long a stream survives with no viewers, so a reconnect can reattach. */
+const VIEWER_GRACE_MS = 5_000;
 
 function readBox(buffer, offset = 0) {
   if (buffer.length - offset < 8) return null;
@@ -101,7 +105,17 @@ class StreamHandle extends EventEmitter {
 
   removeViewer() {
     this.viewers = Math.max(0, this.viewers - 1);
-    if (this.viewers === 0) stopStream(this.streamId);
+    if (this.viewers !== 0) return;
+    // Don't kill ffmpeg the instant a socket blips: the player reconnects with
+    // backoff, and tearing the pipeline down forces a full respawn and a second
+    // of black video for what is often a momentary drop. The timer is bounded,
+    // so this defers the kill rather than risking an orphan — and an explicit
+    // stop or session teardown still kills immediately.
+    clearTimeout(this.orphanTimer);
+    this.orphanTimer = setTimeout(() => {
+      if (this.viewers === 0) stopStream(this.streamId);
+    }, VIEWER_GRACE_MS);
+    this.orphanTimer.unref?.();
   }
 
   spawn() {
@@ -120,7 +134,7 @@ class StreamHandle extends EventEmitter {
       '-movflags', '+frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset',
       '-frag_duration', '200000', 'pipe:1',
     ];
-    const child = spawn(process.env.FFMPEG_PATH || 'ffmpeg', args, {
+    const child = spawn(config.ffmpegPath || 'ffmpeg', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
@@ -228,9 +242,8 @@ class StreamHandle extends EventEmitter {
 export async function startStream(session, profileToken) {
   const profile = session.profileMap.get(profileToken);
   if (!profile?.rtspUri) {
-    const error = new Error('The requested media profile is unavailable.');
-    error.code = 'NOT_FOUND';
-    throw error;
+    throw new AppError('UNSUPPORTED', 'That profile does not expose an RTSP stream.',
+      'On a Hikvision NVR, confirm the channel is online and the ONVIF user is allowed to view it.');
   }
   const handle = new StreamHandle(session, profile);
   streams.set(handle.streamId, handle);
@@ -247,9 +260,9 @@ export async function startStream(session, profileToken) {
     const rejectStream = (message, code = 'STREAM_FAILED') => {
       cleanup();
       stopStream(handle.streamId);
-      const error = new Error(message);
-      error.code = code;
-      reject(error);
+      reject(new AppError(code, message, code === 'FFMPEG_MISSING'
+        ? 'Install ffmpeg (on macOS: brew install ffmpeg) or set FFMPEG_PATH, then restart the server.'
+        : 'Check that the camera is reachable over RTSP on port 554 and that the ONVIF user may view this channel.'));
     };
     const onInit = () => {
       cleanup();
