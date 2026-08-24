@@ -1,5 +1,32 @@
 const BACKOFF_MS = [1_000, 2_000, 4_000, 8_000];
 
+/**
+ * Calls handler(reason) whenever the page can no longer safely receive the end
+ * of an in-progress pointer gesture. Returns a function that removes all hooks.
+ */
+export function onPageInactive(handler) {
+  if (typeof handler !== 'function') throw new TypeError('Page-inactive handler must be a function.');
+  const onVisibility = () => { if (document.visibilityState === 'hidden') handler('hidden'); };
+  const onPageHide = () => handler('pagehide');
+  const onBlur = () => handler('blur');
+  const onPointerCancel = () => handler('pointercancel');
+  document.addEventListener('visibilitychange', onVisibility);
+  window.addEventListener('pagehide', onPageHide);
+  window.addEventListener('blur', onBlur);
+  document.addEventListener('pointercancel', onPointerCancel);
+  return () => {
+    document.removeEventListener('visibilitychange', onVisibility);
+    window.removeEventListener('pagehide', onPageHide);
+    window.removeEventListener('blur', onBlur);
+    document.removeEventListener('pointercancel', onPointerCancel);
+  };
+}
+
+function isInitSegment(data) {
+  return data.byteLength >= 8
+    && String.fromCharCode(data[4], data[5], data[6], data[7]) === 'ftyp';
+}
+
 export function createPlayer({ video, sessionId }) {
   if (!(video instanceof HTMLVideoElement)) throw new TypeError('video must be an HTMLVideoElement.');
   const listeners = new Map();
@@ -13,12 +40,19 @@ export function createPlayer({ video, sessionId }) {
   let objectUrl = null;
   let snapshotImage = null;
   let snapshotTimer = null;
+  let snapshotAbortController = null;
   let snapshotObjectUrl = null;
+  let degradedBadge = null;
   let reconnectTimer = null;
   let reconnectAttempt = 0;
   let generation = 0;
   let appendQueue = [];
   let retryBuffer = null;
+  let currentAppend = null;
+  let initSeen = false;
+  let latestInitSegment = null;
+  let mediaRebuildPromise = null;
+  let latencyAnchor = null;
   let destroyed = false;
   let stopping = false;
 
@@ -53,11 +87,17 @@ export function createPlayer({ video, sessionId }) {
   function clearMedia() {
     appendQueue = [];
     retryBuffer = null;
+    currentAppend = null;
+    latencyAnchor = null;
     if (sourceBuffer) {
       sourceBuffer.removeEventListener('updateend', onUpdateEnd);
       sourceBuffer.removeEventListener('error', onSourceError);
     }
     sourceBuffer = null;
+    if (mediaSource) {
+      mediaSource.removeEventListener('sourceended', onMediaSourceFailure);
+      mediaSource.removeEventListener('error', onMediaSourceFailure);
+    }
     if (mediaSource?.readyState === 'open') {
       try { mediaSource.endOfStream(); } catch { /* Source may already be closing. */ }
     }
@@ -72,17 +112,25 @@ export function createPlayer({ video, sessionId }) {
   function removeSnapshot() {
     clearTimeout(snapshotTimer);
     snapshotTimer = null;
+    snapshotAbortController?.abort();
+    snapshotAbortController = null;
     if (snapshotObjectUrl) URL.revokeObjectURL(snapshotObjectUrl);
     snapshotObjectUrl = null;
     snapshotImage?.remove();
     snapshotImage = null;
+    degradedBadge?.remove();
+    degradedBadge = null;
     video.classList.remove('player-video--degraded');
   }
 
   async function pollSnapshot(myGeneration) {
-    if (generation !== myGeneration || state !== 'degraded') return;
+    if (generation !== myGeneration || state !== 'degraded' || snapshotAbortController) return;
+    const controller = new AbortController();
+    snapshotAbortController = controller;
     try {
-      const response = await fetch(`/api/session/${encodeURIComponent(sessionId)}/snapshot?profile=${encodeURIComponent(profileToken)}`, { cache: 'no-store' });
+      const response = await fetch(`/api/session/${encodeURIComponent(sessionId)}/snapshot?profile=${encodeURIComponent(profileToken)}`, {
+        cache: 'no-store', signal: controller.signal,
+      });
       if (!response.ok) throw new Error(`Snapshot request failed with HTTP ${response.status}.`);
       const blob = await response.blob();
       if (generation !== myGeneration) return;
@@ -92,8 +140,9 @@ export function createPlayer({ video, sessionId }) {
       snapshotObjectUrl = nextUrl;
       if (previous) snapshotImage.addEventListener('load', () => URL.revokeObjectURL(previous), { once: true });
     } catch (error) {
-      emit('error', { code: 'STREAM_FAILED', message: error.message });
+      if (error.name !== 'AbortError') emit('error', { code: 'STREAM_FAILED', message: error.message });
     } finally {
+      if (snapshotAbortController === controller) snapshotAbortController = null;
       if (generation === myGeneration && state === 'degraded') snapshotTimer = setTimeout(() => pollSnapshot(myGeneration), 500);
     }
   }
@@ -122,6 +171,13 @@ export function createPlayer({ video, sessionId }) {
       } else {
         video.insertAdjacentElement('afterend', snapshotImage);
       }
+    }
+    if (!degradedBadge) {
+      degradedBadge = document.createElement('div');
+      degradedBadge.className = 'player-degraded-badge';
+      degradedBadge.textContent = 'Live view unavailable — showing snapshots';
+      degradedBadge.setAttribute('role', 'status');
+      (video.parentElement || snapshotImage.parentElement)?.append(degradedBadge);
     }
     video.classList.add('player-video--degraded');
     pollSnapshot(generation);
@@ -154,7 +210,8 @@ export function createPlayer({ video, sessionId }) {
     }
     retryBuffer = null;
     try {
-      sourceBuffer.appendBuffer(next);
+      currentAppend = next;
+      sourceBuffer.appendBuffer(next.data);
     } catch (error) {
       if (error.name === 'QuotaExceededError') {
         retryBuffer = next;
@@ -167,23 +224,63 @@ export function createPlayer({ video, sessionId }) {
   }
 
   function onUpdateEnd() {
+    if (currentAppend && !currentAppend.isInit && sourceBuffer?.buffered.length) {
+      latencyAnchor = {
+        arrivedAt: currentAppend.arrivedAt,
+        mediaTime: sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1),
+      };
+    }
+    currentAppend = null;
     maintainLiveEdge();
     pump();
     if (state !== 'playing' && video.readyState >= 2) setState('playing');
   }
 
   function onSourceError() {
-    degrade({ reason: 'The browser rejected the video stream.', fallback: 'snapshot' });
+    rebuildMediaSource('The browser rejected the video stream.');
   }
 
-  function enqueue(data) {
-    appendQueue.push(data);
+  function enqueue(data, arrivedAt = performance.now(), init = isInitSegment(data)) {
+    appendQueue.push({ data, arrivedAt, isInit: init });
     pump();
+  }
+
+  function onMediaSourceFailure() {
+    rebuildMediaSource('The browser media pipeline ended unexpectedly.');
+  }
+
+  async function rebuildMediaSource(reason, initData = null, arrivedAt = performance.now()) {
+    if (initData) latestInitSegment = { data: initData, arrivedAt };
+    if (destroyed || stopping || state === 'degraded' || !streamInfo?.mime || mediaRebuildPromise) return;
+    const myGeneration = generation;
+    mediaRebuildPromise = (async () => {
+      clearMedia();
+      initSeen = false;
+      await prepareMediaSource(streamInfo.mime, myGeneration);
+      if (generation !== myGeneration) return;
+      const pendingInit = latestInitSegment;
+      if (pendingInit) {
+        initSeen = true;
+        enqueue(pendingInit.data, pendingInit.arrivedAt, true);
+      }
+    })();
+    try {
+      await mediaRebuildPromise;
+    } catch (error) {
+      if (generation === myGeneration) {
+        emit('error', { code: 'STREAM_FAILED', message: reason });
+        degrade({ reason, fallback: 'snapshot' });
+      }
+    } finally {
+      mediaRebuildPromise = null;
+    }
   }
 
   function prepareMediaSource(mime, myGeneration) {
     return new Promise((resolve, reject) => {
       mediaSource = new MediaSource();
+      mediaSource.addEventListener('sourceended', onMediaSourceFailure);
+      mediaSource.addEventListener('error', onMediaSourceFailure);
       objectUrl = URL.createObjectURL(mediaSource);
       video.src = objectUrl;
       mediaSource.addEventListener('sourceopen', () => {
@@ -210,7 +307,18 @@ export function createPlayer({ video, sessionId }) {
     socket.onmessage = ({ data }) => {
       if (generation !== myGeneration) return;
       if (typeof data !== 'string') {
-        enqueue(new Uint8Array(data));
+        const bytes = new Uint8Array(data);
+        const arrivedAt = performance.now();
+        if (isInitSegment(bytes)) {
+          latestInitSegment = { data: bytes, arrivedAt };
+          if (initSeen) rebuildMediaSource('The stream restarted and the media pipeline could not be reset.', bytes, arrivedAt);
+          else {
+            initSeen = true;
+            enqueue(bytes, arrivedAt, true);
+          }
+        } else if (!mediaRebuildPromise) {
+          enqueue(bytes, arrivedAt, false);
+        }
         return;
       }
       let frame;
@@ -218,9 +326,11 @@ export function createPlayer({ video, sessionId }) {
       if (frame.type === 'ready') return;
       if (frame.type === 'stats') {
         let latencyMs = null;
-        if (sourceBuffer?.buffered.length) {
-          const edge = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-          latencyMs = Math.max(0, Math.round((edge - video.currentTime) * 1000));
+        if (latencyAnchor && Number.isFinite(video.currentTime)) {
+          const elapsed = performance.now() - latencyAnchor.arrivedAt;
+          const presentationOffset = (latencyAnchor.mediaTime - video.currentTime) * 1_000;
+          const estimate = elapsed + presentationOffset;
+          if (Number.isFinite(estimate)) latencyMs = Math.max(0, Math.round(estimate));
         }
         emit('stats', { bitrateKbps: frame.bitrateKbps, fps: frame.fps, droppedFrames: frame.droppedFrames, latencyMs });
       } else if (frame.type === 'degraded') {
@@ -263,6 +373,7 @@ export function createPlayer({ video, sessionId }) {
         return;
       }
       clearMedia();
+      initSeen = false;
       await prepareMediaSource(nextInfo.mime, myGeneration);
       connectSocket(myGeneration);
     } catch (error) {
@@ -296,6 +407,9 @@ export function createPlayer({ video, sessionId }) {
     stopRemote(oldStreamId);
     removeSnapshot();
     clearMedia();
+    initSeen = false;
+    latestInitSegment = null;
+    mediaRebuildPromise = null;
     reconnectAttempt = 0;
     stopping = false;
     if (!destroyed) setState('idle');
@@ -334,6 +448,8 @@ export function createPlayer({ video, sessionId }) {
 
   function destroy() {
     if (destroyed) return;
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+    video.removeEventListener('error', onVideoError);
     stop();
     destroyed = true;
     video.removeAttribute('data-player-state');
@@ -349,5 +465,11 @@ export function createPlayer({ video, sessionId }) {
 
   video.classList.add('player-video');
   video.parentElement?.classList.add('player-surface');
+  const onVisibilityChange = () => {
+    if (document.visibilityState === 'visible') maintainLiveEdge();
+  };
+  const onVideoError = () => rebuildMediaSource('The browser could not decode the video stream.');
+  document.addEventListener('visibilitychange', onVisibilityChange);
+  video.addEventListener('error', onVideoError);
   return { start, stop, destroy, on, getState: () => state };
 }
