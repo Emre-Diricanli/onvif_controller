@@ -338,8 +338,12 @@ export function renderConnect(root, { onConnected, prefillError = null }) {
     }
   }
 
-  connectBtn.addEventListener('pointerup', handleConnect);
-  cleanups.push(() => connectBtn.removeEventListener('pointerup', handleConnect));
+  // Commit on `click`, not `pointerup`. Visual feedback belongs on pointerdown
+  // (see .btn:active), but binding the *action* to a pointer event means a
+  // keyboard user pressing Enter or Space on the focused button — which fires
+  // `click` and no pointer events at all — can never connect.
+  connectBtn.addEventListener('click', handleConnect);
+  cleanups.push(() => connectBtn.removeEventListener('click', handleConnect));
 
   // Enter key submits from any field.
   const onKeydown = (e) => {
@@ -381,8 +385,8 @@ export function renderConnect(root, { onConnected, prefillError = null }) {
           validateField('port');
           fields.username.input.focus();
         };
-        row.addEventListener('pointerup', fill);
-        cleanups.push(() => row.removeEventListener('pointerup', fill));
+        row.addEventListener('click', fill);
+        cleanups.push(() => row.removeEventListener('click', fill));
         discoverList.appendChild(row);
       }
     } catch (err) {
@@ -396,8 +400,8 @@ export function renderConnect(root, { onConnected, prefillError = null }) {
     }
   }
 
-  discoverBtn.addEventListener('pointerup', handleDiscover);
-  cleanups.push(() => discoverBtn.removeEventListener('pointerup', handleDiscover));
+  discoverBtn.addEventListener('click', handleDiscover);
+  cleanups.push(() => discoverBtn.removeEventListener('click', handleDiscover));
 
   card.append(
     hostPortRow,

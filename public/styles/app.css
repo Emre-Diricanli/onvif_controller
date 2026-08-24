@@ -5,6 +5,18 @@
  * elements, so springs are never fighting a stylesheet.
  */
 
+/*
+ * The UA stylesheet's `[hidden] { display: none }` has the same specificity as
+ * any author rule that sets `display` on a class, and author sheets win — so
+ * `.progress-stages { display: flex }` silently defeats `el.hidden = true`.
+ * Several views toggle visibility through the hidden attribute, so make it
+ * authoritative rather than auditing every display rule for collisions.
+ */
+[hidden] {
+  display: none !important;
+}
+
+
 * {
   box-sizing: border-box;
   margin: 0;
@@ -332,7 +344,16 @@ input, select {
   background: #000000;
 }
 
-.stage-video {
+/*
+ * The video surface carries both .stage-video (layout, owned here) and
+ * .player-surface (its own internal styling, owned by player.css). player.css
+ * loads last and sets `position: relative` to create a containing block for its
+ * overlays, which would override a bare `.stage-video` rule and collapse the
+ * surface to zero height. Qualify the selector so specificity decides this
+ * rather than stylesheet order.
+ */
+.controller > .stage-video,
+.stage-video.player-surface {
   position: absolute;
   inset: 0;
 }

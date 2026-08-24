@@ -100,8 +100,8 @@ function renderDevice(container, { sessionId, onError }) {
           .then(() => { if (!destroyed) { syncBtn.textContent = 'Clock synced'; } })
           .catch((err) => { onError(err); if (!destroyed) { syncBtn.disabled = false; } });
       };
-      syncBtn.addEventListener('pointerup', sync);
-      cleanups.push(() => syncBtn.removeEventListener('pointerup', sync));
+      syncBtn.addEventListener('click', sync);
+      cleanups.push(() => syncBtn.removeEventListener('click', sync));
       time.appendChild(syncBtn);
     }
 
@@ -126,8 +126,8 @@ function renderDevice(container, { sessionId, onError }) {
             .catch(onError)
             .finally(() => { if (!destroyed) btn.disabled = false; });
         };
-        btn.addEventListener('pointerup', toggle);
-        cleanups.push(() => btn.removeEventListener('pointerup', toggle));
+        btn.addEventListener('click', toggle);
+        cleanups.push(() => btn.removeEventListener('click', toggle));
         row.append(name, btn);
         relays.appendChild(row);
       }
@@ -161,8 +161,8 @@ function renderDevice(container, { sessionId, onError }) {
           if (!destroyed) { rebootBtn.disabled = false; rebootBtn.textContent = 'Reboot device'; }
         });
     };
-    rebootBtn.addEventListener('pointerup', reboot);
-    cleanups.push(() => rebootBtn.removeEventListener('pointerup', reboot));
+    rebootBtn.addEventListener('click', reboot);
+    cleanups.push(() => rebootBtn.removeEventListener('click', reboot));
     danger.appendChild(rebootBtn);
   }).catch((err) => {
     if (destroyed) return;
@@ -264,7 +264,7 @@ class PanelManager {
     const closeBtn = el('button', 'btn btn-ghost btn-sm panel-close', 'Close');
     closeBtn.type = 'button';
     pressable(closeBtn);
-    closeBtn.addEventListener('pointerup', () => this.close());
+    closeBtn.addEventListener('click', () => this.close());
     header.append(grip, title, closeBtn);
     const content = el('div', 'panel-content');
     root.append(header, content);
@@ -494,8 +494,8 @@ export function renderController(root, { session, onDisconnect }) {
         if (destroyed || btn.disabled || p.token === currentProfile) return;
         selectProfile(p.token);
       };
-      btn.addEventListener('pointerup', switchProfile);
-      cleanups.push(() => btn.removeEventListener('pointerup', switchProfile));
+      btn.addEventListener('click', switchProfile);
+      cleanups.push(() => btn.removeEventListener('click', switchProfile));
       profileSegmented.appendChild(btn);
     }
     topBar.appendChild(profileSegmented);
@@ -597,8 +597,8 @@ export function renderController(root, { session, onDisconnect }) {
       panels.toggle(def.name, btn, def.build);
       btn.classList.toggle('dock-btn-active', panels.isOpen(def.name));
     };
-    btn.addEventListener('pointerup', toggle);
-    cleanups.push(() => btn.removeEventListener('pointerup', toggle));
+    btn.addEventListener('click', toggle);
+    cleanups.push(() => btn.removeEventListener('click', toggle));
     dock.appendChild(btn);
   }
 
@@ -610,8 +610,8 @@ export function renderController(root, { session, onDisconnect }) {
     api.disconnect(session.sessionId).catch(() => {});
     teardownToConnect();
   };
-  disconnectBtn.addEventListener('pointerup', disconnect);
-  cleanups.push(() => disconnectBtn.removeEventListener('pointerup', disconnect));
+  disconnectBtn.addEventListener('click', disconnect);
+  cleanups.push(() => disconnectBtn.removeEventListener('click', disconnect));
   dock.appendChild(disconnectBtn);
 
   shell.appendChild(dock);

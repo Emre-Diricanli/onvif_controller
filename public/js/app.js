@@ -12,14 +12,23 @@ const root = document.getElementById('app');
 
 let currentTeardown = null;
 
-function mount(teardown) {
+/**
+ * Swap the mounted screen.
+ *
+ * Takes a render *function*, not a rendered result: the previous screen has to
+ * be torn down and the root cleared BEFORE the next screen renders into it.
+ * Passing `render(root)` directly would populate the root and then have it
+ * wiped by the clear that follows.
+ */
+function mount(render) {
   if (currentTeardown) currentTeardown();
+  currentTeardown = null;
   root.replaceChildren();
-  currentTeardown = teardown;
+  currentTeardown = render();
 }
 
 function showConnect(prefillError = null) {
-  mount(renderConnect(root, {
+  mount(() => renderConnect(root, {
     onConnected(session) {
       showController(session);
     },
@@ -28,7 +37,7 @@ function showConnect(prefillError = null) {
 }
 
 function showController(session) {
-  mount(renderController(root, {
+  mount(() => renderController(root, {
     session,
     onDisconnect(reason) {
       showConnect(reason || null);

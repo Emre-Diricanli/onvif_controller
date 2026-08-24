@@ -91,8 +91,8 @@ export function renderPresets(container, { sessionId, profile, onError }) {
         .catch(reportError)
         .finally(() => { if (!destroyed) goBtn.disabled = false; });
     };
-    goBtn.addEventListener('pointerup', go);
-    cleanups.push(() => goBtn.removeEventListener('pointerup', go));
+    goBtn.addEventListener('click', go);
+    cleanups.push(() => goBtn.removeEventListener('click', go));
 
     const renameBtn = el('button', 'btn btn-ghost btn-sm', 'Rename');
     renameBtn.type = 'button';
@@ -138,15 +138,15 @@ export function renderPresets(container, { sessionId, profile, onError }) {
           .then(() => { if (!destroyed) { finish(); refresh(); } })
           .catch((err) => { reportError(err); if (!destroyed) { confirmBtn.disabled = false; } });
       };
-      confirmBtn.addEventListener('pointerup', confirm);
-      cancelBtn.addEventListener('pointerup', finish);
+      confirmBtn.addEventListener('click', confirm);
+      cancelBtn.addEventListener('click', finish);
       input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') confirm();
         if (e.key === 'Escape') finish();
       });
     };
-    renameBtn.addEventListener('pointerup', startRename);
-    cleanups.push(() => renameBtn.removeEventListener('pointerup', startRename));
+    renameBtn.addEventListener('click', startRename);
+    cleanups.push(() => renameBtn.removeEventListener('click', startRename));
 
     // --- Two-step delete confirm ---
     let confirming = false;
@@ -180,14 +180,14 @@ export function renderPresets(container, { sessionId, profile, onError }) {
           });
       };
       const onSecondTap = (e) => { e.stopPropagation(); confirm(); };
-      deleteBtn.addEventListener('pointerup', onSecondTap, { once: true });
+      deleteBtn.addEventListener('click', onSecondTap, { once: true });
       cleanups.push(() => {
         document.removeEventListener('pointerdown', cancel, true);
-        deleteBtn.removeEventListener('pointerup', onSecondTap);
+        deleteBtn.removeEventListener('click', onSecondTap);
       });
     };
-    deleteBtn.addEventListener('pointerup', startDelete);
-    cleanups.push(() => deleteBtn.removeEventListener('pointerup', startDelete));
+    deleteBtn.addEventListener('click', startDelete);
+    cleanups.push(() => deleteBtn.removeEventListener('click', startDelete));
 
     return row;
   }
@@ -213,10 +213,10 @@ export function renderPresets(container, { sessionId, profile, onError }) {
         if (!destroyed) { saving = false; saveBtn.disabled = false; }
       });
   };
-  saveBtn.addEventListener('pointerup', save);
+  saveBtn.addEventListener('click', save);
   nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(); });
   cleanups.push(() => {
-    saveBtn.removeEventListener('pointerup', save);
+    saveBtn.removeEventListener('click', save);
   });
 
   refresh();

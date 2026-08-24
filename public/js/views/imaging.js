@@ -192,8 +192,8 @@ export function renderImaging(container, { sessionId, profile, onError }) {
             for (const [b] of entry.buttons) b.disabled = false;
           });
       };
-      btn.addEventListener('pointerup', choose);
-      cleanups.push(() => btn.removeEventListener('pointerup', choose));
+      btn.addEventListener('click', choose);
+      cleanups.push(() => btn.removeEventListener('click', choose));
       group.appendChild(btn);
     }
     selectSegment(entry, String(current));

@@ -263,8 +263,8 @@ export function renderJoystick(container, { sessionId, profile, ptz, onError }) 
     homeBtn.type = 'button';
     cleanups.push(pressable(homeBtn));
     const go = () => api.ptzHome(sessionId, profile, 'goto').catch(reportError);
-    homeBtn.addEventListener('pointerup', go);
-    cleanups.push(() => homeBtn.removeEventListener('pointerup', go));
+    homeBtn.addEventListener('click', go);
+    cleanups.push(() => homeBtn.removeEventListener('click', go));
     actions.appendChild(homeBtn);
     hasActions = true;
   }
@@ -275,8 +275,8 @@ export function renderJoystick(container, { sessionId, profile, ptz, onError }) 
       btn.type = 'button';
       cleanups.push(pressable(btn));
       const run = () => api.ptzAux(sessionId, profile, command).catch(reportError);
-      btn.addEventListener('pointerup', run);
-      cleanups.push(() => btn.removeEventListener('pointerup', run));
+      btn.addEventListener('click', run);
+      cleanups.push(() => btn.removeEventListener('click', run));
       actions.appendChild(btn);
     }
     hasActions = true;
