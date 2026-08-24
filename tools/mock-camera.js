@@ -109,12 +109,28 @@ function systemDateAndTime(offsetSeconds = 0) {
 </SOAP-ENV:Envelope>`;
 }
 
+/** Per-operation call counts, so tests can assert what the camera actually received. */
+const callCounts = Object.create(null);
+
 const server = http.createServer((req, res) => {
+  // Test introspection endpoint. Not part of ONVIF; it exists so the smoke
+  // suite can assert that e.g. a Stop really reached the device.
+  if (req.method === 'GET' && req.url.startsWith('/__calls')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(callCounts));
+    return;
+  }
+  if (req.method === 'POST' && req.url.startsWith('/__reset')) {
+    for (const k of Object.keys(callCounts)) delete callCounts[k];
+    res.writeHead(204).end();
+    return;
+  }
   let body = '';
   req.on('data', (c) => { body += c; });
   req.on('end', () => {
     const op = operationOf(body);
     const service = serviceFor(body, req.url);
+    if (op) callCounts[op] = (callCounts[op] ?? 0) + 1;
     const password = (body.match(/<[^>]*Password[^>]*>([^<]*)</) ?? [])[1] ?? '';
 
     // GetSystemDateAndTime is the one unauthenticated call in ONVIF, and the

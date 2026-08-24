@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { config } from './config.js';
 import { AppError } from './errors.js';
 import { attachEvents } from './onvif/events.js';
+import { stopMove, disarmMoveWatchdog } from './onvif/ptz.js';
 
 /** In-memory only. Credentials must never reach disk. */
 const sessions = new Map();
@@ -83,6 +84,19 @@ export function destroySession(id) {
 
   for (const handler of destroyHandlers) {
     try { handler(id); } catch { /* one bad listener must not block teardown */ }
+  }
+
+  // Never leave a camera panning. Teardown happens on disconnect, on idle
+  // expiry, and on shutdown — in every one of those cases the operator is gone
+  // and any in-flight continuous move would otherwise run to a hard limit.
+  disarmMoveWatchdog(session);
+  if (session.ptz && session.cam) {
+    const profileToken = session.profiles?.[0]?.token;
+    if (profileToken) {
+      // Fire and forget: the caller is tearing down and cannot await this, and
+      // a camera that has already gone offline must not block the teardown.
+      stopMove(session, { profileToken, panTilt: true, zoom: true }).catch(() => {});
+    }
   }
   try { session.events?.detach?.(); } catch { /* ignore */ }
   try { session.cam?.removeAllListeners?.(); } catch { /* ignore */ }

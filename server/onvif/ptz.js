@@ -1,4 +1,16 @@
 import { AppError } from '../errors.js';
+
+/**
+ * How long a continuous move may run without a fresh keepalive before the
+ * server stops it on its own.
+ *
+ * The joystick re-sends a move every ~100ms while held, so silence for well
+ * over a second means the client is gone: the tab was closed or backgrounded,
+ * the laptop slept, or the network dropped. Without this, the camera keeps
+ * panning until it hits a mechanical limit — the browser is simply not a
+ * trustworthy place to put the only stop signal.
+ */
+const MOVE_KEEPALIVE_MS = 1500;
 import { callCam, tryCam, asArray, num, normalized, speed01, toDeviceRange, fromDeviceRange } from './util.js';
 
 function readSpace(space, fallbackMin, fallbackMax) {
@@ -96,6 +108,24 @@ async function coalescedMove(session, profileToken, run) {
   }
 }
 
+/** Cancel any armed dead-man timer for this session. */
+export function disarmMoveWatchdog(session) {
+  if (session.ptzWatchdog) {
+    clearTimeout(session.ptzWatchdog);
+    session.ptzWatchdog = null;
+  }
+}
+
+function armMoveWatchdog(session, profileToken) {
+  disarmMoveWatchdog(session);
+  session.ptzWatchdog = setTimeout(() => {
+    session.ptzWatchdog = null;
+    // Best effort: the client is already gone, so there is nobody to report to.
+    stopMove(session, { profileToken, panTilt: true, zoom: true }).catch(() => {});
+  }, MOVE_KEEPALIVE_MS);
+  session.ptzWatchdog.unref?.();
+}
+
 export async function continuousMove(session, { profileToken, pan, tilt, zoom }) {
   requirePtz(session);
   const p = normalized(pan, 'pan');
@@ -107,6 +137,7 @@ export async function continuousMove(session, { profileToken, pan, tilt, zoom })
       await stopMove(session, { profileToken, panTilt: true, zoom: true });
       return;
     }
+    armMoveWatchdog(session, profileToken);
     await callCam(session.cam, 'continuousMove', {
       profileToken,
       ...velocity(session, { pan: p, tilt: t, zoom: z }),
@@ -118,6 +149,7 @@ export async function continuousMove(session, { profileToken, pan, tilt, zoom })
 
 export async function stopMove(session, { profileToken, panTilt = true, zoom = true }) {
   requirePtz(session);
+  disarmMoveWatchdog(session);
   try {
     await callCam(session.cam, 'stop', { profileToken, panTilt, zoom }, { ctx: session.ctx });
   } catch (err) {

@@ -195,6 +195,29 @@ Everything below is enforced in review; treat it as spec, not taste.
 - The UI always shows true connection state. Optimistic UI is banned for anything
   that touches the camera — if a PTZ move failed, the knob must not pretend.
 
+## 7a. PTZ safety
+
+A continuous move runs until the camera is told to stop. That makes the stop
+signal safety-critical, and the browser is not a trustworthy place to keep the
+only copy of it: a closed tab, a slept laptop, or a dropped Wi-Fi link all end
+the conversation without a stop, and the camera keeps panning into a mechanical
+limit.
+
+Three independent layers, in order of how much they can be trusted:
+
+1. **Client**: release, `pointercancel`, `pointerleave`, and page-inactive
+   (visibilitychange / pagehide / blur) all issue an immediate stop.
+2. **Server dead-man watchdog**: a continuous move arms a 1.5s timer, re-armed
+   by every keepalive. The joystick sends one every ~100ms while held, so
+   silence for longer than that means the client is gone and the server stops
+   the camera itself. This is the layer that actually holds when the browser
+   dies.
+3. **Session teardown**: disconnect, idle expiry, and shutdown each stop any
+   in-flight move before dropping the device connection.
+
+Layers 2 and 3 are covered by `tools/smoke.mjs`, including the negative case —
+a held joystick must not be interrupted by the watchdog.
+
 ## 8. Security posture
 
 - Binds `127.0.0.1` by default. `--host 0.0.0.0` must be an explicit opt-in flag

@@ -182,6 +182,49 @@ async function main() {
   check('relay outputs is an array', Array.isArray(deviceBody.relayOutputs));
 
 
+
+  console.log('\nPTZ safety (server-side dead-man watchdog)');
+  // The browser is not a trustworthy place for the only stop signal: a closed
+  // tab, a slept laptop or a dropped network all leave a continuous move
+  // running. The server must stop the camera on its own.
+  const calls = () => fetch(`http://127.0.0.1:${MOCK_PORT}/__calls`).then((r) => r.json());
+  const resetCalls = () => fetch(`http://127.0.0.1:${MOCK_PORT}/__reset`, { method: 'POST' });
+
+  if (session.capabilities?.ptz) {
+    await resetCalls();
+    await fetch(`${BASE}/api/session/${id}/ptz/move`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile, pan: 0.6, tilt: 0, zoom: 0 }),
+    });
+    const afterMove = await calls();
+    check('continuous move reaches the camera', (afterMove.ContinuousMove ?? 0) >= 1, JSON.stringify(afterMove));
+    check('no stop issued while the move is fresh', (afterMove.Stop ?? 0) === 0, JSON.stringify(afterMove));
+
+    // Go quiet, as a dead client would, and let the watchdog fire.
+    await delay(2200);
+    const afterSilence = await calls();
+    check('watchdog stops the camera when the client goes silent',
+      (afterSilence.Stop ?? 0) >= 1, JSON.stringify(afterSilence));
+
+    // A keepalive stream must NOT trip the watchdog.
+    await resetCalls();
+    for (let i = 0; i < 8; i++) {
+      await fetch(`${BASE}/api/session/${id}/ptz/move`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile, pan: 0.4, tilt: 0, zoom: 0 }),
+      });
+      await delay(150);
+    }
+    const duringHold = await calls();
+    check('a held joystick is not interrupted by the watchdog',
+      (duringHold.Stop ?? 0) === 0, JSON.stringify(duringHold));
+    await fetch(`${BASE}/api/session/${id}/ptz/stop`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile }),
+    });
+  }
+
   console.log('\nWebSockets');
   // The REST surface passing tells you nothing about the sockets: both were
   // green here while every /ws/events connection was dying on a TDZ error.
@@ -269,7 +312,21 @@ async function main() {
   check('unreachable carries an actionable hint', Boolean(refusedBody.error?.hint));
 
   console.log('\nDisconnect and process hygiene');
+  if (session.capabilities?.ptz) {
+    // Start a move, then disconnect mid-flight: teardown must stop the camera.
+    await resetCalls();
+    await fetch(`${BASE}/api/session/${id}/ptz/move`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile, pan: 0.5, tilt: 0.2, zoom: 0 }),
+    });
+  }
   const disconnect = await fetch(`${BASE}/api/session/${id}/disconnect`, { method: 'POST' });
+  if (session.capabilities?.ptz) {
+    await delay(600);
+    const afterTeardown = await calls();
+    check('disconnecting mid-move stops the camera', (afterTeardown.Stop ?? 0) >= 1,
+      JSON.stringify(afterTeardown));
+  }
   check('disconnect returns 204', disconnect.status === 204);
   const afterDisconnect = await fetch(`${BASE}/api/session/${id}`);
   check('session is gone after disconnect', afterDisconnect.status === 404);
