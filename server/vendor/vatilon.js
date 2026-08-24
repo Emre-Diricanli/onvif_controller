@@ -109,7 +109,7 @@ function createClient(config) {
     fetch: injectedFetch,
     transport,
     digest = {},
-    readBackDelayMs = 120,
+    readBackDelays = [150, 400, 900],
   } = config;
   const fetchFn = injectedFetch ?? transport ?? globalThis.fetch;
   if (typeof fetchFn !== 'function') throw new TypeError('A fetch-compatible transport is required.');
@@ -216,12 +216,20 @@ function createClient(config) {
       const result = parseJson(text, 'writing imaging settings');
       if (result.status !== 'ok') throw deviceError('The device rejected the imaging update.');
 
-      await delay(readBackDelayMs);
-      const after = await readRawImage();
-      const { settings } = normalizeImage(after);
-      const applied = {};
-      for (const [key, expected] of Object.entries(patch)) {
-        applied[key] = sameValue(settings[key], expected);
+      // Poll rather than sleeping once. The device does not apply the change
+      // synchronously with the response, and a single short delay reports
+      // applied:false for a write that did land — which is precisely the lie
+      // this driver exists to avoid. Mirrors the ONVIF path in
+      // server/onvif/imaging.js.
+      let settings = null;
+      let applied = {};
+      for (const waitMs of readBackDelays) {
+        await delay(waitMs);
+        settings = normalizeImage(await readRawImage()).settings;
+        applied = Object.fromEntries(
+          Object.entries(patch).map(([key, expected]) => [key, sameValue(settings[key], expected)]),
+        );
+        if (Object.values(applied).every(Boolean)) break;
       }
       return { settings, applied };
     },
