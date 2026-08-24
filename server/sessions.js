@@ -1,0 +1,117 @@
+import { randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
+import { config } from './config.js';
+import { AppError } from './errors.js';
+import { attachEvents } from './onvif/events.js';
+
+/** In-memory only. Credentials must never reach disk. */
+const sessions = new Map();
+const destroyHandlers = new Set();
+
+export function onSessionDestroyed(handler) {
+  destroyHandlers.add(handler);
+  return () => destroyHandlers.delete(handler);
+}
+
+export function createSession({ host, port, username, password, cam, device, capabilities, profiles, profileMap, ptz }) {
+  const id = randomUUID();
+  const session = {
+    id,
+    host,
+    port,
+    username,
+    password,
+    cam,
+    device,
+    capabilities,
+    profiles,
+    profileMap,
+    ptz,
+    ctx: { host, port },
+    timeoutMs: config.onvifTimeoutMs,
+    inflight: new Map(),
+    events: new EventEmitter(),
+    eventsAttached: false,
+    createdAt: Date.now(),
+    lastSeenAt: Date.now(),
+    touch() { this.lastSeenAt = Date.now(); },
+  };
+
+  if (capabilities.events) {
+    try {
+      session.events = attachEvents(session);
+    } catch {
+      // A device that advertises Events but cannot subscribe should still be
+      // fully usable for streaming and PTZ.
+      session.capabilities.events = false;
+    }
+  }
+
+  sessions.set(id, session);
+  return session;
+}
+
+export function getSession(id) {
+  const session = sessions.get(id);
+  if (session) session.touch();
+  return session;
+}
+
+/** Route helper: resolve or throw the SESSION_EXPIRED envelope. */
+export function requireSession(id) {
+  const session = getSession(id);
+  if (!session) {
+    throw new AppError('SESSION_EXPIRED', 'That session is no longer active.',
+      'Sessions end after 30 minutes idle or when the server restarts. Reconnect to the camera to continue.');
+  }
+  return session;
+}
+
+/** Resolve a profile token, defaulting to the first profile when omitted. */
+export function requireProfile(session, token) {
+  const resolved = token ?? session.profiles[0]?.token;
+  if (!resolved || !session.profileMap.has(resolved)) {
+    throw new AppError('BAD_REQUEST', `Unknown profile "${token ?? '(none)'}".`);
+  }
+  return resolved;
+}
+
+export function destroySession(id) {
+  const session = sessions.get(id);
+  if (!session) return false;
+  sessions.delete(id);
+
+  for (const handler of destroyHandlers) {
+    try { handler(id); } catch { /* one bad listener must not block teardown */ }
+  }
+  try { session.events?.detach?.(); } catch { /* ignore */ }
+  try { session.cam?.removeAllListeners?.(); } catch { /* ignore */ }
+
+  session.password = null;
+  session.cam = null;
+  session.profileMap?.clear?.();
+  return true;
+}
+
+/** Client-safe view. Deliberately omits password, cam, and every RTSP URI. */
+export function serializeSession(session, { includeId = false } = {}) {
+  return {
+    ...(includeId ? { sessionId: session.id } : {}),
+    device: session.device,
+    capabilities: session.capabilities,
+    profiles: session.profiles,
+    ptz: session.ptz,
+  };
+}
+
+const reaper = setInterval(() => {
+  const cutoff = Date.now() - config.sessionIdleMs;
+  for (const [id, session] of sessions) {
+    if (session.lastSeenAt < cutoff) destroySession(id);
+  }
+}, 60_000);
+reaper.unref();
+
+export function shutdownAllSessions() {
+  for (const id of [...sessions.keys()]) destroySession(id);
+}
