@@ -8,6 +8,7 @@
  * that can be checked without real hardware.
  */
 import { spawn } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import WsClient from 'ws';
 import path from 'node:path';
@@ -501,6 +502,134 @@ async function main() {
     ['DEVICE_UNREACHABLE', 'DEVICE_TIMEOUT'].includes(refusedBody.error?.code),
     JSON.stringify(refusedBody).slice(0, 200));
   check('unreachable carries an actionable hint', Boolean(refusedBody.error?.hint));
+
+  console.log('\nVendor CGI mock (Vatilon protocol fidelity, VENDOR.md)');
+  // Tests the mock itself over plain HTTP — the driver is built by another
+  // work stream and must not be imported from here. If the mock is lenient
+  // where the real camera is strict, the driver passes here and fails in the
+  // field, so these checks assert the strict behaviours directly.
+  {
+    const md5 = (s) => createHash('md5').update(s).digest('hex');
+    const VENDOR_PORT = MOCK_PORT + 10;
+    const VBASE = (port) => `http://127.0.0.1:${port}/cgi-bin/web.cgi`;
+    const DIGEST = {
+      realm: 'CAMERA',
+      nonce: 'b6ef824ee4090bbd124a4ccb39c5333a',
+      qop: 'auth',
+      nc: '00000001',
+      // HA2 covers this uri, never the one actually requested (VENDOR.md §1).
+      uri: '/cgi-bin/web.cgi?mod=account&cmd=check',
+    };
+    function digestHeader(username, password, uri = DIGEST.uri) {
+      const cnonce = randomBytes(8).toString('hex');
+      const ha1 = md5(`${username}:${DIGEST.realm}:${password}`);
+      const ha2 = md5(`GET:${uri}`);
+      const response = md5(`${ha1}:${DIGEST.nonce}:${DIGEST.nc}:${cnonce}:${DIGEST.qop}:${ha2}`);
+      return `Digest username="${username}", realm="${DIGEST.realm}", nonce="${DIGEST.nonce}", `
+        + `uri="${uri}", qop=${DIGEST.qop}, nc=${DIGEST.nc}, cnonce="${cnonce}", response="${response}"`;
+    }
+    const vendorLogin = (port, password = 'admin', uri) => fetch(`${VBASE(port)}?mod=session&cmd=login1`, {
+      headers: { Authorization: digestHeader('admin', password, uri) },
+    });
+    const vendorGet = (port, sid) => fetch(`${VBASE(port)}?mod=image&cmd=get`, { headers: { 'Session-Id': sid } });
+    const vendorSet = (port, sid, body, contentType = 'application/json') => fetch(VBASE(port), {
+      method: 'POST',
+      headers: { 'Content-Type': contentType, 'Session-Id': sid },
+      body,
+    });
+
+    start('mock-vendor', ['tools/mock-vendor-camera.js', String(VENDOR_PORT)]);
+    start('mock-vendor-ignore', ['tools/mock-vendor-camera.js', String(VENDOR_PORT + 1)], { MOCK_VENDOR_MODE: 'ignore' });
+    start('mock-vendor-expire', ['tools/mock-vendor-camera.js', String(VENDOR_PORT + 2)], { MOCK_VENDOR_MODE: 'expire' });
+    if (!await waitForPort(`http://127.0.0.1:${VENDOR_PORT}/__calls`)
+      || !await waitForPort(`http://127.0.0.1:${VENDOR_PORT + 1}/__calls`)
+      || !await waitForPort(`http://127.0.0.1:${VENDOR_PORT + 2}/__calls`)) {
+      console.error('Vendor mocks did not come up. Run with VERBOSE=1 to see why.');
+      process.exit(1);
+    }
+
+    const login = await vendorLogin(VENDOR_PORT);
+    const sid = login.headers.get('session-id');
+    check('hand-rolled digest logs in', login.status === 200, `got ${login.status}`);
+    check('login returns a Session-Id response header', typeof sid === 'string' && sid.length > 0);
+
+    // A correct STANDARD digest: HA2 over the requested uri. The real device
+    // rejects it because it computes HA2 over the hardcoded account/check uri.
+    const standard = await vendorLogin(VENDOR_PORT, 'admin', '/cgi-bin/web.cgi?mod=session&cmd=login1');
+    check('a correct STANDARD digest is rejected', standard.status !== 200 && !standard.headers.get('session-id'),
+      `got ${standard.status}`);
+
+    const wrongPassword = await vendorLogin(VENDOR_PORT, 'wrong');
+    check('a wrong password is rejected', wrongPassword.status !== 200 && !wrongPassword.headers.get('session-id'),
+      `got ${wrongPassword.status}`);
+
+    const noSession = await fetch(`${VBASE(VENDOR_PORT)}?mod=image&cmd=get`);
+    check('a request without Session-Id is rejected', (await noSession.text()) === 'unknown error happened',
+      `got ${noSession.status}`);
+
+    const getRes = await vendorGet(VENDOR_PORT, sid);
+    const img = await getRes.json();
+    const SCALARS = ['brightness', 'contrast', 'saturation', 'sharpness', 'exposure', 'day_night_mode',
+      'wdr_enable', 'mirror', 'flip', 'rotation', 'nr_enable', 'mwb_red', 'mwb_blue', 'mwb_green'];
+    check('image get returns the documented scalar fields',
+      SCALARS.every((f) => typeof img[f] === 'number'), JSON.stringify(img).slice(0, 250));
+    check('scalars default to 128 within 0..255',
+      SCALARS.every((f) => img[f] === 128), JSON.stringify(img).slice(0, 250));
+    check('image get returns nested day_begin and day_end objects',
+      typeof img.day_begin === 'object' && img.day_begin !== null
+      && typeof img.day_end === 'object' && img.day_end !== null);
+
+    const OK_BODY = JSON.stringify({ status: 'ok', data: '' });
+    const setBody = (param2) => JSON.stringify({ mod: 'image', cmd: 'set', param: { channel: 0 }, param2 });
+    const setRes = await vendorSet(VENDOR_PORT, sid, setBody({ ...img, brightness: 200 }));
+    check('a correct two-param set returns ok JSON', setRes.status === 200 && (await setRes.text()) === OK_BODY);
+    const afterSet = await (await vendorGet(VENDOR_PORT, sid)).json();
+    check('a correct two-param set applies and reads back', afterSet.brightness === 200, JSON.stringify(afterSet).slice(0, 150));
+
+    const oneParam = await vendorSet(VENDOR_PORT, sid, JSON.stringify({ mod: 'image', cmd: 'set', param: { channel: 0 } }));
+    const oneParamText = await oneParam.text();
+    check('a one-param set returns the bare text "param num error"',
+      oneParam.status === 200 && oneParamText === 'param num error', `got ${oneParam.status} ${oneParamText}`);
+
+    const changedOnly = await vendorSet(VENDOR_PORT, sid, setBody({ brightness: 100 }));
+    check('a set carrying only the changed field is rejected',
+      changedOnly.status === 200 && (await changedOnly.text()) === 'param num error');
+
+    const formEncoded = await vendorSet(VENDOR_PORT, sid, 'mod=image&cmd=set&param=channel', 'application/x-www-form-urlencoded');
+    check('a form-encoded set is rejected',
+      formEncoded.status === 200 && (await formEncoded.text()) === 'param num error');
+
+    const unknownMod = await fetch(`${VBASE(VENDOR_PORT)}?mod=ptz&cmd=move`, { headers: { 'Session-Id': sid } });
+    check('an unrecognized module returns the bare text "unknown error happened"',
+      unknownMod.status === 200 && (await unknownMod.text()) === 'unknown error happened');
+
+    // Ignore mode: the ONVIF Imaging disease reproduced on the CGI. A driver
+    // that trusts the HTTP status instead of reading back must be caught.
+    const iLogin = await vendorLogin(VENDOR_PORT + 1);
+    const iSid = iLogin.headers.get('session-id');
+    const iBefore = await (await vendorGet(VENDOR_PORT + 1, iSid)).json();
+    const iSet = await vendorSet(VENDOR_PORT + 1, iSid, setBody({ ...iBefore, brightness: 90 }));
+    check('ignore-mode set returns ok', iSet.status === 200 && (await iSet.text()) === OK_BODY);
+    const iAfter = await (await vendorGet(VENDOR_PORT + 1, iSid)).json();
+    check('ignore-mode write changes nothing on read-back', iAfter.brightness === iBefore.brightness,
+      `before=${iBefore.brightness} after=${iAfter.brightness}`);
+
+    // Expire mode: the session dies after the first authenticated request.
+    const eLogin = await vendorLogin(VENDOR_PORT + 2);
+    const eSid = eLogin.headers.get('session-id');
+    const eFirst = await vendorGet(VENDOR_PORT + 2, eSid);
+    check('expire mode serves the first authenticated request',
+      eFirst.status === 200 && typeof (await eFirst.json()).brightness === 'number');
+    const eSecond = await vendorGet(VENDOR_PORT + 2, eSid);
+    check('expire mode kills the session after one request',
+      (await eSecond.text()) === 'unknown error happened');
+    const eRelogin = await vendorLogin(VENDOR_PORT + 2);
+    const eSid2 = eRelogin.headers.get('session-id');
+    check('re-login after expiry succeeds', eRelogin.status === 200 && Boolean(eSid2) && eSid2 !== eSid);
+    const eThird = await vendorGet(VENDOR_PORT + 2, eSid2);
+    check('the fresh session works after re-login',
+      eThird.status === 200 && typeof (await eThird.json()).brightness === 'number');
+  }
 
   console.log('\nDisconnect and process hygiene');
   if (session.capabilities?.ptz) {
