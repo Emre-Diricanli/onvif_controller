@@ -1,10 +1,9 @@
 // views/controller.js — the main shell.
 //
-// The video is the hero surface; control panels are translucent
-// backdrop-filter layers over and around it. Panels render ONLY for services
-// the capability matrix reports as supported — an unsupported panel is
-// absent, never disabled. Panel enter/exit runs on springs along the same
-// path, with transform-origin anchored to the dock control that opened it.
+// The video is the hero surface; controls live in a persistent translucent
+// sidebar (a draggable bottom sheet on narrow screens). Sections render ONLY
+// for services the capability matrix reports as supported — an unsupported
+// section is absent, never disabled. Multiple sections may remain open.
 // Nothing here is optimistic: every state shown comes from the player, the
 // WebSocket, or a completed API call.
 
@@ -218,258 +217,118 @@ function renderCapabilities(container, { session }) {
   return { el: wrap, destroy() {} };
 }
 
-// ---------------------------------------------------------------------------
-// Panel manager — one translucent panel at a time, spring enter/exit along
-// the same path, transform-origin anchored to the opener, drag-to-dismiss
-// with rubber-band resistance and momentum projection.
-// ---------------------------------------------------------------------------
-class PanelManager {
-  constructor(host, { onError, onOpenChange }) {
-    this.host = host;
-    this.onError = onError;
-    this.onOpenChange = onOpenChange || (() => {});
-    this.openName = null;
-    this.panel = null;       // { name, root, view, motion, dragCleanup }
-    this.views = new Map();  // name -> { view, builtForProfile }
-  }
+const SIDEBAR_STATE_KEY = 'onvif-controller-sidebar-v1';
 
-  isOpen(name) {
-    return this.openName === name;
-  }
-
-  /** Drop built views so a profile switch rebuilds them against the new token. */
-  invalidateViews() {
-    for (const { view } of this.views.values()) {
-      if (view && view.destroy) view.destroy();
-    }
-    this.views.clear();
-    if (this.panel) this.close(true);
-  }
-
-  toggle(name, anchorBtn, buildView) {
-    if (this.isOpen(name)) {
-      this.close();
-    } else {
-      this.open(name, anchorBtn, buildView);
-    }
-  }
-
-  open(name, anchorBtn, buildView) {
-    if (this.panel) this.close(true);
-
-    const root = el('div', 'panel');
-    root.setAttribute('role', 'dialog');
-    root.setAttribute('aria-modal', 'false');
-    root.setAttribute('aria-label', name);
-    const header = el('div', 'panel-header');
-    const grip = el('div', 'panel-grip');
-    const title = el('h2', 'panel-title', name);
-    const closeBtn = el('button', 'btn btn-ghost btn-sm panel-close', 'Close');
-    closeBtn.type = 'button';
-    pressable(closeBtn);
-    closeBtn.addEventListener('click', () => this.close());
-    header.append(grip, title, closeBtn);
-    const content = el('div', 'panel-content');
-    root.append(header, content);
-    this.host.appendChild(root);
-
-    // Build (or reuse) the view for this panel.
-    let entry = this.views.get(name);
-    if (!entry) {
-      const view = buildView(content);
-      entry = { view };
-      this.views.set(name, entry);
-    } else {
-      content.appendChild(entry.view.el);
-    }
-
-    this.panel = { name, root, closeBtn, anchorBtn, drag: { ty: 0, spring: null } };
-    this.openName = name;
-    if (anchorBtn) {
-      anchorBtn.setAttribute('aria-haspopup', 'dialog');
-      anchorBtn.setAttribute('aria-expanded', 'true');
-    }
-    this.onOpenChange(name);
-
-    // Escape dismisses the panel from anywhere; it never traps focus.
-    const onKeydown = (e) => {
-      if (e.key !== 'Escape') return;
-      e.preventDefault();
-      this.close();
+function readSidebarState() {
+  try {
+    const value = JSON.parse(localStorage.getItem(SIDEBAR_STATE_KEY));
+    return {
+      collapsed: Boolean(value?.collapsed),
+      expanded: new Set(Array.isArray(value?.expanded) ? value.expanded : ['PTZ', 'Imaging']),
     };
-    document.addEventListener('keydown', onKeydown);
-    this.panel.escapeCleanup = () => document.removeEventListener('keydown', onKeydown);
+  } catch {
+    return { collapsed: false, expanded: new Set(['PTZ', 'Imaging']) };
+  }
+}
 
-    // Focus moves into the panel when it opens...
-    closeBtn.focus({ preventScroll: true });
+function writeSidebarState(state) {
+  try {
+    localStorage.setItem(SIDEBAR_STATE_KEY, JSON.stringify({
+      collapsed: state.collapsed,
+      expanded: [...state.expanded],
+    }));
+  } catch { /* storage may be disabled; state still lasts for this mount */ }
+}
 
-    // Anchor the transform-origin to the control that opened the panel, so
-    // enter and exit run along the same spatial path.
-    requestAnimationFrame(() => {
-      if (this.panel?.root !== root) return;
-      const p = root.getBoundingClientRect();
-      const b = anchorBtn.getBoundingClientRect();
-      const ox = Math.min(Math.max(b.left + b.width / 2 - p.left, 0), p.width);
-      root.style.transformOrigin = `${ox}px ${p.height}px`;
-    });
-
-    this.animateOpen(root);
-    this.attachDrag(header, root);
+class SidebarSections {
+  constructor(host, definitions, state, cleanups) {
+    this.host = host;
+    this.definitions = definitions;
+    this.state = state;
+    this.cleanups = cleanups;
+    this.entries = new Map();
+    this.build();
   }
 
-  animateOpen(root) {
-    if (prefersReducedMotion()) {
-      root.style.opacity = '0';
-      const s = spring({
-        from: 0, to: 1, response: 0.2,
-        onUpdate: (v) => { root.style.opacity = String(v); },
-      });
-      this.panel.openSpring = s;
-      return;
+  build() {
+    for (const def of this.definitions) {
+      if (!def.available()) continue;
+      const section = el('section', 'sidebar-section');
+      const heading = el('h2', 'sidebar-section-heading');
+      const button = el('button', 'sidebar-section-toggle');
+      button.type = 'button';
+      const id = `sidebar-section-${def.name.toLowerCase()}`;
+      const label = el('span', 'sidebar-section-label', def.name);
+      const chevron = el('span', 'sidebar-section-chevron', '⌄');
+      chevron.setAttribute('aria-hidden', 'true');
+      button.append(label, chevron);
+      heading.appendChild(button);
+      const content = el('div', 'sidebar-section-content');
+      content.id = id;
+      button.setAttribute('aria-controls', id);
+      const open = this.state.expanded.has(def.name);
+      button.setAttribute('aria-expanded', String(open));
+      content.hidden = !open;
+      section.classList.toggle('sidebar-section-open', open);
+      section.append(heading, content);
+      this.host.appendChild(section);
+      const view = def.build(content);
+      const entry = { def, section, button, content, view, spring: null, value: open ? 1 : 0 };
+      this.entries.set(def.name, entry);
+      this.cleanups.push(pressable(button, { scale: 0.985 }));
+      const toggle = () => this.setOpen(entry, !this.state.expanded.has(def.name));
+      button.addEventListener('click', toggle);
+      this.cleanups.push(() => button.removeEventListener('click', toggle));
     }
-    const s = spring({
-      from: 0, to: 1, damping: 1.0, response: 0.35,
-      onUpdate: (v) => {
-        const inv = 1 - v;
-        root.style.opacity = String(v);
-        root.style.transform = `translateY(${24 * inv}px) scale(${0.94 + 0.06 * v})`;
-      },
-    });
-    this.panel.openSpring = s;
   }
 
-  attachDrag(handleEl, root) {
-    const panel = this.panel;
-    panel.dragCleanup = draggable(handleEl, {
-      axis: 'y',
-      hysteresis: 8,
-      onStart: () => {
-        if (panel.openSpring) { panel.openSpring.stop(); panel.openSpring = null; }
-        if (panel.drag.spring) { panel.drag.spring.stop(); panel.drag.spring = null; }
-        panel.drag.ty = 0;
-      },
-      onMove: ({ dy }) => {
-        // Downward drag tracks 1:1; upward rubber-bands at the top bound.
-        panel.drag.ty = dy > 0 ? dy : rubberband(dy, root.offsetHeight || 1);
-        root.style.transform = `translateY(${panel.drag.ty}px) scale(1)`;
-        root.style.opacity = String(1 - Math.max(0, Math.min(panel.drag.ty / (root.offsetHeight || 1), 0.6)));
-      },
-      onEnd: ({ velocity, committed }) => {
-        if (!committed) return;
-        const height = root.offsetHeight || 1;
-        const projected = panel.drag.ty + project(velocity.y);
-        if (projected > height * 0.4) {
-          // Momentum carries it away — dismiss along the same path.
-          this.dismissWithVelocity(velocity.y);
-        } else if (prefersReducedMotion()) {
-          panel.drag.ty = 0;
-          root.style.transform = '';
-          root.style.opacity = '1';
-        } else {
-          panel.drag.spring = spring({
-            from: panel.drag.ty, to: 0, velocity: velocity.y,
-            damping: 1.0, response: 0.3,
-            onUpdate: (v) => {
-              panel.drag.ty = v;
-              root.style.transform = `translateY(${v}px) scale(1)`;
-              root.style.opacity = String(1 - Math.min(Math.abs(v) / height, 0.6));
-            },
-            onComplete: () => {
-              root.style.transform = '';
-              root.style.opacity = '1';
-              panel.drag.spring = null;
-            },
-          });
-        }
-      },
-    });
-  }
+  setOpen(entry, open, immediate = false) {
+    if (open) this.state.expanded.add(entry.def.name);
+    else this.state.expanded.delete(entry.def.name);
+    writeSidebarState(this.state);
+    entry.button.setAttribute('aria-expanded', String(open));
+    entry.section.classList.toggle('sidebar-section-open', open);
+    if (entry.spring) entry.spring.stop();
+    if (open) entry.content.hidden = false;
 
-  dismissWithVelocity(vy) {
-    const panel = this.panel;
-    if (!panel) return;
-    const { root } = panel;
-    const height = root.offsetHeight || 1;
-    const finish = () => this.close(true);
-    if (prefersReducedMotion()) {
-      const s = spring({
-        from: 1, to: 0, response: 0.2,
-        onUpdate: (v) => { root.style.opacity = String(v); },
-        onComplete: finish,
-      });
-      panel.openSpring = s;
-      return;
-    }
-    panel.openSpring = spring({
-      from: panel.drag.ty, to: height + 40, velocity: vy,
-      damping: 1.0, response: 0.3,
-      onUpdate: (v) => {
-        root.style.transform = `translateY(${v}px) scale(${1 - Math.min(v / height, 1) * 0.06})`;
-        root.style.opacity = String(1 - Math.min(v / height, 1));
-      },
+    const apply = (value) => {
+      entry.value = value;
+      entry.content.style.opacity = String(value);
+      entry.content.style.transform = prefersReducedMotion()
+        ? 'none'
+        : `translateY(${(1 - value) * -8}px) scale(${0.985 + value * 0.015})`;
+    };
+    const finish = () => {
+      entry.spring = null;
+      if (!open) entry.content.hidden = true;
+      entry.content.style.opacity = '';
+      entry.content.style.transform = '';
+    };
+    if (immediate) { apply(open ? 1 : 0); finish(); return; }
+    entry.spring = spring({
+      from: entry.value,
+      to: open ? 1 : 0,
+      damping: 1.0,
+      response: prefersReducedMotion() ? 0.2 : 0.35,
+      onUpdate: apply,
       onComplete: finish,
     });
-    this.openName = null; // already semantically closed; animation runs out
   }
 
-  /** Close the open panel. immediate=true skips the exit spring (teardown). */
-  close(immediate = false) {
-    const panel = this.panel;
-    if (!panel) return;
-    this.panel = null;
-    this.openName = null;
-    if (panel.dragCleanup) panel.dragCleanup();
-    if (panel.escapeCleanup) panel.escapeCleanup();
-    if (panel.drag.spring) panel.drag.spring.stop();
-    if (panel.openSpring) panel.openSpring.stop();
-
-    // Return focus to the control that opened the panel. Without this a
-    // keyboard user is dumped back at the top of the document every time they
-    // dismiss one, and Escape becomes a trap of a different kind.
-    if (panel.anchorBtn && panel.anchorBtn.isConnected && document.activeElement !== panel.anchorBtn) {
-      const active = document.activeElement;
-      const focusWasInPanel = !active || active === document.body || panel.root.contains(active);
-      if (focusWasInPanel) panel.anchorBtn.focus({ preventScroll: true });
+  rebuildViews() {
+    for (const entry of this.entries.values()) {
+      entry.view?.destroy?.();
+      entry.content.replaceChildren();
+      entry.view = entry.def.build(entry.content);
     }
-    if (panel.anchorBtn) panel.anchorBtn.setAttribute('aria-expanded', 'false');
-
-    const { root, name } = panel;
-    const entry = this.views.get(name);
-    const detach = () => {
-      if (entry && entry.view.el.parentNode === root.querySelector('.panel-content')) {
-        entry.view.el.remove();
-      }
-      root.remove();
-    };
-
-    if (immediate || prefersReducedMotion() && !root.isConnected) {
-      detach();
-      return;
-    }
-    if (prefersReducedMotion()) {
-      const s = spring({
-        from: 1, to: 0, response: 0.2,
-        onUpdate: (v) => { root.style.opacity = String(v); },
-        onComplete: () => { s.stop(); detach(); },
-      });
-      return;
-    }
-    // Exit along the same path it entered: down and slightly smaller, out
-    // through the anchored transform-origin.
-    const s = spring({
-      from: 1, to: 0, damping: 1.0, response: 0.3,
-      onUpdate: (v) => {
-        const inv = 1 - v;
-        root.style.opacity = String(v);
-        root.style.transform = `translateY(${24 * inv}px) scale(${0.94 + 0.06 * v})`;
-      },
-      onComplete: () => { s.stop(); detach(); },
-    });
   }
 
   destroy() {
-    this.close(true);
-    this.invalidateViews();
+    for (const entry of this.entries.values()) {
+      entry.spring?.stop();
+      entry.view?.destroy?.();
+    }
+    this.entries.clear();
   }
 }
 
@@ -592,14 +451,6 @@ export function renderController(root, { session, onDisconnect }) {
   stage.appendChild(toast);
   shell.appendChild(stage);
 
-  // --- Panels ---
-  const panelHost = el('div', 'panel-host');
-  shell.appendChild(panelHost);
-  const panels = new PanelManager(panelHost, { onError: showError });
-
-  // --- Dock ---
-  const dock = el('div', 'dock');
-
   const ctx = () => ({
     sessionId: session.sessionId,
     profile: currentProfile,
@@ -641,21 +492,28 @@ export function renderController(root, { session, onDisconnect }) {
     },
   ];
 
-  for (const def of PANEL_DEFS) {
-    if (!def.available()) continue; // absent, never disabled
-    const btn = el('button', 'btn dock-btn', def.name);
-    btn.type = 'button';
-    cleanups.push(pressable(btn));
-    const toggle = () => {
-      panels.toggle(def.name, btn, def.build);
-      btn.classList.toggle('dock-btn-active', panels.isOpen(def.name));
-    };
-    btn.addEventListener('click', toggle);
-    cleanups.push(() => btn.removeEventListener('click', toggle));
-    dock.appendChild(btn);
-  }
-
-  const disconnectBtn = el('button', 'btn btn-ghost dock-btn dock-disconnect', 'Disconnect');
+  // --- Persistent controls: right sidebar on wide screens, draggable sheet on mobile ---
+  const sidebarState = readSidebarState();
+  const sidebar = el('aside', 'controller-sidebar');
+  sidebar.setAttribute('aria-label', 'Camera controls');
+  const sidebarHeader = el('div', 'sidebar-header');
+  const sheetGrip = el('div', 'sidebar-sheet-grip');
+  sheetGrip.setAttribute('aria-hidden', 'true');
+  const sidebarTitle = el('h1', 'sidebar-title', 'Camera controls');
+  const sidebarToggle = el('button', 'btn btn-ghost btn-sm sidebar-collapse');
+  sidebarToggle.type = 'button';
+  sidebarToggle.setAttribute('aria-label', 'Collapse camera controls');
+  const videoSidebarToggle = el('button', 'btn btn-ghost btn-sm video-sidebar-toggle', 'Show controls');
+  videoSidebarToggle.type = 'button';
+  videoSidebarToggle.setAttribute('aria-label', 'Expand camera controls');
+  videoSidebarToggle.hidden = true;
+  stage.appendChild(videoSidebarToggle);
+  sidebarHeader.append(sheetGrip, sidebarTitle, sidebarToggle);
+  const sidebarScroll = el('div', 'sidebar-scroll');
+  const sidebarSectionsHost = el('div', 'sidebar-sections');
+  sidebarScroll.appendChild(sidebarSectionsHost);
+  const sidebarFooter = el('div', 'sidebar-footer');
+  const disconnectBtn = el('button', 'btn btn-danger sidebar-disconnect', 'Disconnect');
   disconnectBtn.type = 'button';
   cleanups.push(pressable(disconnectBtn));
   const disconnect = () => {
@@ -665,9 +523,102 @@ export function renderController(root, { session, onDisconnect }) {
   };
   disconnectBtn.addEventListener('click', disconnect);
   cleanups.push(() => disconnectBtn.removeEventListener('click', disconnect));
-  dock.appendChild(disconnectBtn);
+  sidebarFooter.appendChild(disconnectBtn);
+  sidebar.append(sidebarHeader, sidebarScroll, sidebarFooter);
+  shell.appendChild(sidebar);
 
-  shell.appendChild(dock);
+  const sections = new SidebarSections(sidebarSectionsHost, PANEL_DEFS, sidebarState, cleanups);
+  let sidebarSpring = null;
+  let sidebarValue = sidebarState.collapsed ? 1 : 0;
+  let dragStartValue = sidebarValue;
+  const mobileQuery = window.matchMedia('(max-width: 56.25rem)');
+
+  function closedDistance() {
+    return mobileQuery.matches
+      ? Math.max(0, sidebar.offsetHeight - sidebarHeader.offsetHeight)
+      : sidebar.offsetWidth;
+  }
+
+  function paintSidebar(value) {
+    sidebarValue = value;
+    const distance = closedDistance();
+    sidebar.style.transform = mobileQuery.matches
+      ? `translateY(${distance * value}px)`
+      : `translateX(${distance * value}px)`;
+    shell.classList.toggle('sidebar-collapsed', value >= 0.999);
+  }
+
+  function setSidebarCollapsed(collapsed, velocity = 0) {
+    sidebarState.collapsed = collapsed;
+    writeSidebarState(sidebarState);
+    sidebarToggle.setAttribute('aria-label', collapsed ? 'Expand camera controls' : 'Collapse camera controls');
+    sidebarToggle.textContent = collapsed ? (mobileQuery.matches ? 'Up' : 'Open') : (mobileQuery.matches ? 'Down' : 'Hide');
+    videoSidebarToggle.hidden = !collapsed || mobileQuery.matches;
+    if (sidebarSpring) sidebarSpring.stop();
+    if (prefersReducedMotion()) {
+      paintSidebar(collapsed ? 1 : 0);
+      sidebar.style.opacity = collapsed ? '0.92' : '1';
+      return;
+    }
+    sidebar.style.opacity = '1';
+    sidebarSpring = spring({
+      from: sidebarValue,
+      to: collapsed ? 1 : 0,
+      velocity: velocity / Math.max(closedDistance(), 1),
+      damping: Math.abs(velocity) > 40 ? 0.8 : 1.0,
+      response: 0.35,
+      onUpdate: paintSidebar,
+      onComplete: () => { sidebarSpring = null; },
+    });
+  }
+
+  cleanups.push(pressable(sidebarToggle));
+  const toggleSidebar = () => setSidebarCollapsed(!sidebarState.collapsed);
+  sidebarToggle.addEventListener('click', toggleSidebar);
+  cleanups.push(() => sidebarToggle.removeEventListener('click', toggleSidebar));
+  cleanups.push(pressable(videoSidebarToggle));
+  videoSidebarToggle.addEventListener('click', toggleSidebar);
+  cleanups.push(() => videoSidebarToggle.removeEventListener('click', toggleSidebar));
+
+  const dragCleanup = draggable(sidebarHeader, {
+    axis: mobileQuery.matches ? 'y' : 'x',
+    hysteresis: 8,
+    onStart: () => {
+      sidebarSpring?.stop();
+      sidebarSpring = null;
+      dragStartValue = sidebarValue;
+    },
+    onMove: ({ dx, dy }) => {
+      const distance = Math.max(closedDistance(), 1);
+      const delta = mobileQuery.matches ? dy : dx;
+      const raw = dragStartValue + delta / distance;
+      const value = raw < 0
+        ? rubberband(raw * distance, distance) / distance
+        : raw > 1
+          ? 1 + rubberband((raw - 1) * distance, distance) / distance
+          : raw;
+      paintSidebar(value);
+    },
+    onEnd: ({ committed, velocity }) => {
+      if (!committed) return;
+      const axisVelocity = mobileQuery.matches ? velocity.y : velocity.x;
+      const projected = sidebarValue + project(axisVelocity) / Math.max(closedDistance(), 1);
+      setSidebarCollapsed(projected >= 0.5, axisVelocity);
+    },
+    onCancel: () => setSidebarCollapsed(sidebarState.collapsed),
+  });
+  cleanups.push(dragCleanup);
+
+  const onBreakpointChange = () => {
+    sidebar.style.transform = '';
+    sidebarValue = sidebarState.collapsed ? 1 : 0;
+    paintSidebar(sidebarValue);
+    setSidebarCollapsed(sidebarState.collapsed);
+  };
+  mobileQuery.addEventListener('change', onBreakpointChange);
+  cleanups.push(() => mobileQuery.removeEventListener('change', onBreakpointChange));
+  requestAnimationFrame(() => setSidebarCollapsed(sidebarState.collapsed));
+
   root.appendChild(shell);
 
   // --- Player ---
@@ -745,8 +696,7 @@ export function renderController(root, { session, onDisconnect }) {
     connLabel.textContent = 'Connecting';
     connDot.dataset.tone = 'warn';
     // PTZ/imaging views are per-profile: rebuild them against the new token.
-    panels.invalidateViews();
-    for (const btn of dock.children) btn.classList.remove('dock-btn-active');
+    sections.rebuildViews();
     player.stop();
     player.start(token).catch((err) => showError(err instanceof ApiError ? err : new ApiError('STREAM_FAILED', String(err))));
   }
@@ -778,7 +728,8 @@ export function renderController(root, { session, onDisconnect }) {
 
   return () => {
     destroyed = true;
-    panels.destroy();
+    sections.destroy();
+    sidebarSpring?.stop();
     player.destroy();
     if (toastTimer) clearTimeout(toastTimer);
     if (toastSpring) toastSpring.stop();
