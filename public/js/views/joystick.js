@@ -560,11 +560,29 @@ export function renderJoystick(container, { sessionId, profile, ptz, onError }) 
         btn.addEventListener('pointerup', stop);
         btn.addEventListener('pointercancel', stop);
         btn.addEventListener('pointerleave', stop);
+        // Keyboard hold: Enter/Space down starts, keyup or blur stops. Focus
+        // is a continuous control like the pad, so it cannot be click-only.
+        const keyStart = (e) => {
+          if (e.key !== 'Enter' && e.key !== ' ') return;
+          e.preventDefault(); // keep Space from scrolling and from firing click
+          if (e.repeat) return;
+          start(e);
+        };
+        const keyStop = (e) => {
+          if (e.type === 'keyup' && e.key !== 'Enter' && e.key !== ' ') return;
+          stop();
+        };
+        btn.addEventListener('keydown', keyStart);
+        btn.addEventListener('keyup', keyStop);
+        btn.addEventListener('blur', keyStop);
         cleanups.push(() => {
           btn.removeEventListener('pointerdown', start);
           btn.removeEventListener('pointerup', stop);
           btn.removeEventListener('pointercancel', stop);
           btn.removeEventListener('pointerleave', stop);
+          btn.removeEventListener('keydown', keyStart);
+          btn.removeEventListener('keyup', keyStop);
+          btn.removeEventListener('blur', keyStop);
         });
         focusRow.appendChild(btn);
       }

@@ -125,24 +125,32 @@ export function renderPresets(container, { sessionId, profile, onError }) {
       input.focus();
       input.select();
 
-      const finish = () => {
+      const finish = ({ restoreFocus = false } = {}) => {
         renaming = false;
         row.replaceChild(name, input);
         actions.replaceChildren(goBtn, renameBtn, deleteBtn);
+        // Cancelling from the keyboard must not strand focus on a removed node.
+        if (restoreFocus) renameBtn.focus();
       };
       const confirm = () => {
         const newName = input.value.trim();
         if (!newName) { input.focus(); return; }
         confirmBtn.disabled = true;
         api.savePreset(sessionId, profile, newName, preset.token)
-          .then(() => { if (!destroyed) { finish(); refresh(); } })
+          .then(() => {
+            if (destroyed) return;
+            finish();
+            refresh();
+            // refresh() replaces the rows; park focus somewhere stable.
+            nameInput.focus();
+          })
           .catch((err) => { reportError(err); if (!destroyed) { confirmBtn.disabled = false; } });
       };
       confirmBtn.addEventListener('click', confirm);
-      cancelBtn.addEventListener('click', finish);
+      cancelBtn.addEventListener('click', () => finish({ restoreFocus: true }));
       input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') confirm();
-        if (e.key === 'Escape') finish();
+        if (e.key === 'Escape') finish({ restoreFocus: true });
       });
     };
     renameBtn.addEventListener('click', startRename);
@@ -155,21 +163,39 @@ export function renderPresets(container, { sessionId, profile, onError }) {
       confirming = true;
       deleteBtn.textContent = 'Confirm delete';
       deleteBtn.classList.add('btn-danger-solid');
-      const cancel = (e) => {
-        if (deleteBtn.contains(e.target)) return;
+      const reset = () => {
         confirming = false;
         deleteBtn.textContent = 'Delete';
         deleteBtn.classList.remove('btn-danger-solid');
         document.removeEventListener('pointerdown', cancel, true);
+        deleteBtn.removeEventListener('keydown', onKey);
+        // Disarming must also disarm the armed second click, or the next
+        // single click would delete without a confirm step.
+        deleteBtn.removeEventListener('click', onSecondTap);
+      };
+      const cancel = (e) => {
+        if (deleteBtn.contains(e.target)) return;
+        reset();
+      };
+      // Escape disarms the confirm — a keyboard user has no "click elsewhere".
+      const onKey = (e) => {
+        if (e.key !== 'Escape') return;
+        e.stopPropagation();
+        reset();
       };
       document.addEventListener('pointerdown', cancel, true);
+      deleteBtn.addEventListener('keydown', onKey);
       const confirm = () => {
         if (!confirming) return;
-        confirming = false;
-        document.removeEventListener('pointerdown', cancel, true);
+        reset();
         deleteBtn.disabled = true;
         api.deletePreset(sessionId, profile, preset.token)
-          .then(() => { if (!destroyed) refresh(); })
+          .then(() => {
+            if (destroyed) return;
+            refresh();
+            // The row is gone after refresh; park focus somewhere stable.
+            nameInput.focus();
+          })
           .catch((err) => {
             reportError(err);
             if (!destroyed) {
@@ -183,6 +209,7 @@ export function renderPresets(container, { sessionId, profile, onError }) {
       deleteBtn.addEventListener('click', onSecondTap, { once: true });
       cleanups.push(() => {
         document.removeEventListener('pointerdown', cancel, true);
+        deleteBtn.removeEventListener('keydown', onKey);
         deleteBtn.removeEventListener('click', onSecondTap);
       });
     };
