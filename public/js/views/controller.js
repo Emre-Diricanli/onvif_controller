@@ -8,7 +8,7 @@
 // Nothing here is optimistic: every state shown comes from the player, the
 // WebSocket, or a completed API call.
 
-import { createPlayer } from './player.js';
+import { createPlayer } from '../player.js';
 import { api, ApiError } from '../api.js';
 import { spring, project, rubberband, prefersReducedMotion } from '../spring.js';
 import { draggable, pressable } from '../gesture.js';
