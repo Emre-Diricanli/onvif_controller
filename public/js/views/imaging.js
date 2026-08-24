@@ -62,12 +62,25 @@ function setPath(obj, path, value) {
  */
 export function renderImaging(container, { sessionId, profile, onError }) {
   const cleanups = [];
+  const refusedFields = new Set();
+  const REFUSED_TEXT = 'The camera accepted this change and then kept its previous value.';
   let destroyed = false;
 
   const wrap = el('div', 'imaging');
   const status = el('p', 'panel-status', 'Reading imaging settings…');
   const body = el('div', 'imaging-body');
-  wrap.append(status, body);
+
+  const stubNotice = el('div', 'imaging-stub-notice');
+  stubNotice.append(
+    el('p', 'imaging-stub-title', 'This camera does not apply imaging changes'),
+    el('p', 'imaging-stub-body',
+      'It reports adjustable ranges and answers every change with success, but keeps its own values. '
+      + 'That is a limitation of the camera firmware, not of this controller — retrying will not help. '
+      + 'Use the camera\u2019s own app or web interface to adjust the picture.'),
+  );
+  stubNotice.hidden = true;
+
+  wrap.append(status, stubNotice, body);
   container.appendChild(wrap);
 
   // Every control owns its presentation value until its newest write settles.
@@ -107,8 +120,28 @@ export function renderImaging(container, { sessionId, profile, onError }) {
         selectSegment(entry, String(value));
       }
     }
-    entry.message.textContent = applied ? '' : 'Camera refused this change. Restored the value reported by the device.';
+    entry.message.textContent = applied ? '' : REFUSED_TEXT;
     entry.row.classList.toggle('imaging-control-refused', !applied);
+
+    if (!applied) refusedFields.add(pathKey);
+    else refusedFields.delete(pathKey);
+    updateStubNotice();
+  }
+
+  /**
+   * Some cameras expose the Imaging service, advertise option ranges, answer
+   * SetImagingSettings with a success envelope, and then apply nothing. That is
+   * firmware, not a bug here and not something the operator can fix by trying
+   * again — so once several distinct controls have all been ignored, say what is
+   * actually going on instead of repeating a per-field "refused" forever.
+   */
+  function updateStubNotice() {
+    const looksLikeStub = refusedFields.size >= 2;
+    stubNotice.hidden = !looksLikeStub;
+    for (const [key, entry] of [...sliders, ...segmented]) {
+      if (!entry.message) continue;
+      if (looksLikeStub && refusedFields.has(key)) entry.message.textContent = '';
+    }
   }
 
   function buildSlider(settings, options, key, label) {

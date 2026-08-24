@@ -1,0 +1,37 @@
+/* Copyable stream URLs. Colours come from tokens.css only. */
+.stream-urls { display: flex; flex-direction: column; gap: var(--space-4); }
+
+.stream-url-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-bottom: var(--space-3);
+  border-bottom: 0.03125rem solid var(--border);
+}
+.stream-url-item:last-of-type { border-bottom: 0; padding-bottom: 0; }
+
+.stream-url-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2); }
+.stream-url-name { font-size: var(--text-sm); font-weight: var(--weight-semibold); color: var(--text); }
+.stream-url-meta { font-size: var(--text-xs); color: var(--text-tertiary); }
+
+.stream-url-field { display: flex; flex-direction: column; gap: var(--space-1); }
+
+.stream-url-box { display: flex; gap: var(--space-2); align-items: stretch; }
+
+.stream-url-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--text-xs);
+  color: var(--text);
+  background: var(--surface-sunken);
+  border: 0.03125rem solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+}
+.stream-url-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.stream-url-copy { flex: none; }
+
+.stream-url-credrow { display: flex; flex-direction: column; gap: var(--space-1); }
+.stream-url-note { margin: 0; font-size: var(--text-xs); line-height: 1.45; color: var(--text-tertiary); }

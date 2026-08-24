@@ -15,6 +15,7 @@ import { renderJoystick } from './joystick.js';
 import { renderPresets } from './presets.js';
 import { renderImaging } from './imaging.js';
 import { renderEvents } from './events.js';
+import { renderStreamUrls } from './streamurls.js';
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -479,6 +480,12 @@ export function renderController(root, { session, onDisconnect }) {
       name: 'Events',
       available: () => Boolean(session.capabilities && session.capabilities.events),
       build: (c) => renderEvents(c, { sessionId: session.sessionId, onError: showError }),
+    },
+    {
+      name: 'Stream URLs',
+      // Anything with a media profile has something worth copying.
+      available: () => Array.isArray(session.profiles) && session.profiles.length > 0,
+      build: (c) => renderStreamUrls(c, { sessionId: session.sessionId, onError: showError }),
     },
     {
       name: 'Device',

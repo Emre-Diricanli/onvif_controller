@@ -82,6 +82,8 @@ export const api = {
   // --- Media ---
   getProfiles: (id) => get(`${s(id)}/profiles`),
   snapshotUrl: (id, profile) => `${s(id)}/snapshot${q({ profile })}`,
+  getStreamUrls: (id, credentials = false) =>
+    get(`${s(id)}/stream-urls${credentials ? q({ credentials: 'true' }) : ''}`),
   startStream: (id, profile) => post(`${s(id)}/stream/start`, { profile }),
   stopStream: (id, streamId) => post(`${s(id)}/stream/stop`, { streamId }),
 
