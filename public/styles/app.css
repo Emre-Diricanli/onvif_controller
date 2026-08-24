@@ -342,6 +342,7 @@ input, select {
   height: 100dvh;
   overflow: hidden;
   background: #000000;
+  --sidebar-width: clamp(20rem, 24vw, 24rem);
 }
 
 /*
@@ -355,7 +356,12 @@ input, select {
 .controller > .stage-video,
 .stage-video.player-surface {
   position: absolute;
-  inset: 0;
+  inset: 0 var(--sidebar-width) 0 0;
+}
+
+.controller.sidebar-collapsed > .stage-video,
+.sidebar-collapsed .stage-video.player-surface {
+  right: 0;
 }
 
 .player-video {
@@ -484,103 +490,129 @@ input, select {
   color: var(--text-secondary);
 }
 
-/* --- Dock --- */
-.dock {
+/* --- Persistent controller sidebar --- */
+.controller-sidebar {
   position: absolute;
-  bottom: calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
-  left: 50%;
-  translate: -50% 0;
-  display: flex;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  background: var(--surface);
-  backdrop-filter: var(--blur);
-  -webkit-backdrop-filter: var(--blur);
-  border: 0.03125rem solid var(--border);
-  border-radius: var(--radius-pill);
-  box-shadow: var(--shadow-panel);
-  z-index: 4;
-  max-width: calc(100% - 2rem);
-  overflow-x: auto;
-}
-
-.dock-btn {
-  flex: none;
-  font-size: var(--text-sm);
-}
-
-.dock-btn-active {
-  background: var(--accent-fill);
-  color: var(--accent);
-}
-
-.dock-disconnect {
-  color: var(--danger);
-}
-
-/* --- Panels --- */
-.panel-host {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  z-index: 5;
-}
-
-.panel {
-  position: absolute;
-  left: var(--space-4);
-  right: var(--space-4);
-  bottom: calc(5rem + env(safe-area-inset-bottom, 0px));
-  margin-inline: auto;
-  max-width: 26rem;
-  max-height: min(60dvh, 32rem);
+  inset: 0 0 0 auto;
+  width: var(--sidebar-width);
   display: flex;
   flex-direction: column;
   background: var(--surface);
   backdrop-filter: var(--blur);
   -webkit-backdrop-filter: var(--blur);
-  border: 0.03125rem solid var(--border);
-  border-radius: var(--radius-lg);
+  border-left: 0.03125rem solid var(--border);
   box-shadow: var(--shadow-pop);
-  pointer-events: auto;
+  z-index: 7;
   will-change: transform, opacity;
   overflow: hidden;
 }
 
-.panel-header {
+.sidebar-header {
   display: flex;
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
   border-bottom: 0.03125rem solid var(--border);
-  touch-action: none;
-  cursor: grab;
+  touch-action: pan-y;
   flex: none;
   position: relative;
+  min-height: 3.75rem;
 }
 
-.panel-grip {
-  position: absolute;
-  top: var(--space-1);
-  left: 50%;
-  translate: -50% 0;
-  width: 2.25rem;
-  height: 0.3125rem;
-  border-radius: var(--radius-pill);
-  background: var(--track);
+.sidebar-sheet-grip {
+  display: none;
 }
 
-.panel-title {
+.sidebar-title {
   font-size: var(--text-lg);
   flex: 1;
 }
 
-.panel-content {
+.sidebar-collapse {
+  flex: none;
+}
+
+.sidebar-scroll {
   overflow-y: auto;
-  padding: var(--space-4);
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.sidebar-sections {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+}
+
+.sidebar-section {
+  border-bottom: 0.03125rem solid var(--border);
+}
+
+.sidebar-section-heading {
+  font-size: inherit;
+}
+
+.sidebar-section-toggle {
+  width: 100%;
+  min-height: 3rem;
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  text-align: left;
+  touch-action: manipulation;
+  will-change: transform;
+}
+
+.sidebar-section-toggle:focus-visible,
+.sidebar-collapse:focus-visible {
+  outline: 0.125rem solid var(--accent);
+  outline-offset: -0.1875rem;
+}
+
+.sidebar-section-label {
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-heading);
+}
+
+.sidebar-section-chevron {
+  color: var(--text-secondary);
+  transform: rotate(-90deg);
+}
+
+.sidebar-section-open .sidebar-section-chevron {
+  transform: rotate(0deg);
+}
+
+.sidebar-section-content {
+  padding: 0 var(--space-4) var(--space-4);
+  transform-origin: top center;
+  will-change: transform, opacity;
+}
+
+.sidebar-footer {
+  flex: none;
+  padding: var(--space-3) var(--space-4) calc(var(--space-3) + env(safe-area-inset-bottom, 0px));
+  border-top: 0.03125rem solid var(--border-strong);
+  background: var(--surface);
+}
+
+.sidebar-disconnect {
+  width: 100%;
+}
+
+.video-sidebar-toggle {
+  position: absolute;
+  top: var(--space-4);
+  right: var(--space-4);
+  z-index: 5;
+  background: var(--surface);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 0.03125rem solid var(--border);
+  box-shadow: var(--shadow-panel);
 }
 
 .panel-status {
@@ -979,14 +1011,83 @@ input, select {
 .caps-yes { color: var(--success); }
 .caps-no { color: var(--text-tertiary); }
 
-/* --- Narrow screens --- */
-@media (max-width: 34rem) {
-  .panel {
-    left: var(--space-2);
-    right: var(--space-2);
-    bottom: calc(4.75rem + env(safe-area-inset-bottom, 0px));
+@media (max-width: 56.25rem) {
+  .controller > .stage-video,
+  .stage-video.player-surface,
+  .controller.sidebar-collapsed > .stage-video,
+  .sidebar-collapsed .stage-video.player-surface {
+    inset: 0;
   }
 
+  .controller-sidebar {
+    inset: auto 0 0;
+    width: 100%;
+    height: min(78dvh, 42rem);
+    border-left: 0;
+    border-top: 0.03125rem solid var(--border);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  }
+
+  .sidebar-header {
+    min-height: 4rem;
+    padding-top: var(--space-4);
+    touch-action: none;
+    cursor: grab;
+  }
+
+  .sidebar-sheet-grip {
+    display: block;
+    position: absolute;
+    top: var(--space-2);
+    left: 50%;
+    translate: -50% 0;
+    width: 2.5rem;
+    height: 0.3125rem;
+    border-radius: var(--radius-pill);
+    background: var(--track);
+  }
+
+  .overlay {
+    left: var(--space-2);
+    right: var(--space-2);
+  }
+
+  .overlay-top {
+    top: calc(var(--space-2) + env(safe-area-inset-top, 0px));
+    flex-wrap: wrap;
+    border-radius: var(--radius-md);
+  }
+
+  .profile-switcher {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .toast {
+    top: 7rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-section-content {
+    transform: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .controller-sidebar,
+  .sidebar-footer {
+    border-color: var(--border-strong);
+  }
+
+  .sidebar-section-toggle:focus-visible,
+  .sidebar-collapse:focus-visible {
+    outline-width: 0.1875rem;
+  }
+}
+
+/* --- Narrow screens --- */
+@media (max-width: 34rem) {
   .overlay {
     left: var(--space-2);
     right: var(--space-2);
@@ -1000,7 +1101,7 @@ input, select {
 
 /* --- Stream unavailable / degraded message ------------------------------- *
  * SPEC.md §5 requires visible degradation. This sits centred over the video
- * surface, above the player's own overlays but below the panels and the dock,
+ * surface, above the player's own overlays but below the controls,
  * so it never covers a control the operator needs to reach.
  */
 .stage-message {
