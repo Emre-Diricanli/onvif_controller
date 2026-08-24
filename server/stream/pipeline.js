@@ -11,6 +11,22 @@ const FAILURE_WINDOW_MS = 30_000;
 /** How long a stream survives with no viewers, so a reconnect can reattach. */
 const VIEWER_GRACE_MS = 5_000;
 
+function killChild(child, context = 'stream teardown') {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  try { child.kill('SIGKILL'); } catch { return; }
+  const warningTimer = setTimeout(() => {
+    if (child.exitCode === null && child.signalCode === null) {
+      console.warn(`[stream] ffmpeg did not exit within 2s of SIGKILL during ${context}.`);
+    }
+  }, 2_000);
+  warningTimer.unref?.();
+  child.once('close', () => clearTimeout(warningTimer));
+}
+
+function killAllChildren(context) {
+  for (const child of children) killChild(child, context);
+}
+
 function readBox(buffer, offset = 0) {
   if (buffer.length - offset < 8) return null;
   let size = buffer.readUInt32BE(offset);
@@ -229,10 +245,9 @@ class StreamHandle extends EventEmitter {
     const child = this.child;
     this.child = null;
     if (child) {
-      children.delete(child);
       child.stdout?.destroy();
       child.stderr?.destroy();
-      if (!child.killed) child.kill('SIGKILL');
+      killChild(child, 'stream teardown');
     }
     this.emit('close');
     this.removeAllListeners();
@@ -306,8 +321,9 @@ export function stopAllForSession(sessionId) {
   }
 }
 
-process.once('exit', () => {
-  for (const child of children) {
-    try { child.kill('SIGKILL'); } catch { /* Process is already gone. */ }
-  }
-});
+// Signal listeners run before core's graceful shutdown handlers. The monitor
+// hook observes fatal exceptions without changing Node's normal crash behavior.
+process.prependListener('SIGINT', () => killAllChildren('SIGINT'));
+process.prependListener('SIGTERM', () => killAllChildren('SIGTERM'));
+process.on('uncaughtExceptionMonitor', () => killAllChildren('uncaught exception'));
+process.once('exit', () => killAllChildren('process exit'));
