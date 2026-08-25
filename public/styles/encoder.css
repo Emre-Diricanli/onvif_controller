@@ -1,0 +1,318 @@
+/* encoder.css — video encoder configuration view.
+ *
+ * Every visual value resolves through tokens.css custom properties; no
+ * colour, radius, spacing or type size is hardcoded. Light and dark come
+ * from the tokens' prefers-color-scheme blocks.
+ */
+
+.encoder {
+  display: grid;
+  gap: var(--space-4);
+  color: var(--text);
+}
+
+.encoder-status,
+.encoder-result {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.encoder-result {
+  outline: none;
+}
+
+.encoder-error {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border: 0.0625rem solid var(--danger);
+  border-radius: var(--radius-md);
+  background: var(--danger-fill);
+}
+
+.encoder-error-message {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.encoder-error-hint {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.encoder-body {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.encoder-field {
+  display: grid;
+  align-content: start;
+  gap: var(--space-2);
+}
+
+.encoder-label {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.encoder-message {
+  min-height: 1.1em;
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--text-xs);
+  line-height: 1.35;
+}
+
+.encoder-message:empty {
+  display: none;
+}
+
+.encoder-field-invalid .encoder-resolutions,
+.encoder-field-refused .encoder-segmented,
+.encoder-field-refused .encoder-resolutions,
+.encoder-field-refused .encoder-slider {
+  outline: 0.125rem solid var(--danger);
+  outline-offset: 0.1875rem;
+  border-radius: var(--radius-sm);
+}
+
+/* --- Codec segmented control --- */
+
+.encoder-segmented {
+  display: inline-flex;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: 0.0625rem solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  justify-self: start;
+}
+
+.encoder-segment {
+  min-height: 2.25rem;
+  padding: var(--space-1) var(--space-4);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+  transition: transform 140ms cubic-bezier(0.23, 1, 0.32, 1), background 140ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.encoder-segment:active {
+  transform: scale(0.96);
+}
+
+.encoder-segment-active {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+/* --- Resolution picker --- */
+
+.encoder-resolutions {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(7.5rem, 1fr));
+  gap: var(--space-2);
+}
+
+.encoder-resolution {
+  display: grid;
+  gap: 0.125rem;
+  justify-items: start;
+  min-height: 2.75rem;
+  padding: var(--space-2) var(--space-3);
+  border: 0.0625rem solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  transition: transform 140ms cubic-bezier(0.23, 1, 0.32, 1), border-color 140ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.encoder-resolution:active {
+  transform: scale(0.97);
+}
+
+.encoder-resolution-name {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.encoder-resolution-hint {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.encoder-resolution-active {
+  border-color: var(--accent);
+  background: var(--accent-fill);
+}
+
+.encoder-resolution-active .encoder-resolution-hint {
+  color: var(--text-secondary);
+}
+
+.encoder-resolutions-empty {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+/* --- Framerate / bitrate sliders --- */
+
+.encoder-slider-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.encoder-slider-value {
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+.encoder-slider {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+/* --- Staged changes summary --- */
+
+.encoder-staged {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 0.0625rem solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+}
+
+.encoder-staged-title {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.encoder-staged-list {
+  margin: 0;
+  padding-inline-start: var(--space-4);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.encoder-warning {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 0.0625rem solid var(--warning);
+  border-radius: var(--radius-sm);
+  background: var(--warning-fill);
+  color: var(--text);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.encoder-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding-top: var(--space-1);
+}
+
+.encoder-apply,
+.encoder-discard {
+  min-height: 2.75rem;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-lg);
+  font: inherit;
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+  transition: transform 140ms cubic-bezier(0.23, 1, 0.32, 1), opacity 140ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.encoder-apply {
+  border: 0;
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.encoder-discard {
+  border: 0.0625rem solid var(--border);
+  background: transparent;
+  color: var(--text);
+}
+
+.encoder-apply:active:not(:disabled),
+.encoder-discard:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.encoder-apply:disabled,
+.encoder-discard:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+/* --- Focus rings, always visible --- */
+
+.encoder-segment:focus-visible,
+.encoder-resolution:focus-visible,
+.encoder-apply:focus-visible,
+.encoder-discard:focus-visible,
+.encoder-result:focus-visible {
+  outline: 0.125rem solid var(--accent);
+  outline-offset: 0.125rem;
+}
+
+.encoder-slider:focus-visible {
+  outline: 0.125rem solid var(--accent);
+  outline-offset: 0.25rem;
+  border-radius: var(--radius-sm);
+}
+
+/* --- Accessibility preferences --- */
+
+@media (prefers-reduced-motion: reduce) {
+  .encoder-segment,
+  .encoder-resolution,
+  .encoder-apply,
+  .encoder-discard {
+    transition: none;
+  }
+  .encoder-segment:active,
+  .encoder-resolution:active,
+  .encoder-apply:active:not(:disabled),
+  .encoder-discard:active:not(:disabled) {
+    transform: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .encoder-segmented,
+  .encoder-resolution,
+  .encoder-discard,
+  .encoder-staged,
+  .encoder-warning {
+    border-width: 0.125rem;
+  }
+  .encoder-field-invalid .encoder-resolutions,
+  .encoder-field-refused .encoder-segmented,
+  .encoder-field-refused .encoder-resolutions,
+  .encoder-field-refused .encoder-slider {
+    outline-width: 0.1875rem;
+  }
+}
