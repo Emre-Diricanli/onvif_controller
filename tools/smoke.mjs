@@ -184,11 +184,17 @@ async function playbackProbeChecks() {
     ...envelope,
     services: [svc('ver10/recording', 'recording'), svc('ver10/replay', 'replay'), svc('ver10/search', 'search')],
     uri: {},
+    _parseUrl: (u) => new URL(u),
     _request: (opts, cb) => {
       sent.push(opts.body);
-      if (/FindRecordings|FindEvents/.test(opts.body)) return cb(null, { searchToken: 'TOK-1' }, '');
+      // cam._request hands back raw xml2js output, where every node is an
+      // array. Mirror that shape here so this test exercises the same parsing
+      // path a real recorder drives.
+      if (/FindRecordings|FindEvents/.test(opts.body)) {
+        return cb(null, [{ findRecordingsResponse: [{ searchToken: ['TOK-1'] }] }], '');
+      }
       if (/GetRecordingSearchResults|GetEventSearchResults/.test(opts.body)) return cb(new Error('search backend offline'));
-      return cb(null, {}, '');
+      return cb(null, [{}], '');
     },
     getRecordingServiceCapabilities: (cb) => cb(null, { dynamicRecordings: false }),
     getRecordingSummary: (cb) => cb(null, { dataFrom: '2026-08-24T00:00:00Z', dataUntil: '2026-08-25T00:00:00Z' }),
