@@ -108,6 +108,12 @@ real cases this app now handles explicitly rather than failing confusingly:
   values. Verified on a Vatilon "Sinis 5MP IPC" against five different SOAP
   shapes — all ignored. The Imaging section detects this and says so instead of
   repeating a per-slider error; the fix is the camera's own app, not this one.
+- **Imaging that only works over a proprietary API.** Where ONVIF is a stub, the
+  app falls back to the camera's own HTTP API. ONVIF is always tried first; a
+  vendor driver is consulted only after ONVIF has been caught accepting a write
+  and changing nothing, and the UI says when that is happening. Drivers live in
+  `server/vendor/`; the protocol and the driver interface are in `VENDOR.md`.
+  Set `VENDOR_HTTP_PORT` if a camera's web UI is not on port 80.
 - **An event subscription that kills the process.** The `onvif` library calls
   `unsubscribe()` from inside its own PullMessages error path and throws
   synchronously when the subscription has already lapsed. Because it throws from

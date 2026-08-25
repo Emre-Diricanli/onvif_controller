@@ -57,9 +57,12 @@ export async function getVendorConnection(session, { timeoutMs = 8000 } = {}) {
   if (state.failures >= MAX_VENDOR_FAILURES) return null;
   if (state.probed && !state.driver) return null;
 
+  // The proprietary web UI lives on plain HTTP, which is usually port 80 and
+  // usually NOT the ONVIF port. Overridable because some installations move it,
+  // and because the test suite needs to point it at a mock.
   const credentials = {
     host: session.host,
-    port: 80,          // the proprietary UI is on plain HTTP, not the ONVIF port
+    port: Number(process.env.VENDOR_HTTP_PORT ?? 80),
     username: session.username,
     password: session.password,
     timeoutMs,

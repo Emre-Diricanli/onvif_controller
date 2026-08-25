@@ -468,6 +468,73 @@ async function main() {
     check('guarded unsubscribe handles the bare call shape too', !bareThrew);
   }
 
+
+  console.log('\nVendor fallback end to end (ONVIF stub + working vendor API)');
+  {
+    // Neither branch could test this: it needs an ONVIF camera that accepts
+    // imaging writes and ignores them, AND a vendor CGI on the same host that
+    // actually works. That is exactly the operator's camera.
+    const onvifPort = MOCK_PORT + 40;
+    const vendorPort = MOCK_PORT + 41;
+    const appPort = APP_PORT + 3;
+
+    start('mock-onvif-stub', ['tools/mock-camera.js', String(onvifPort)], { MOCK_IMAGING_MODE: 'ignore' });
+    start('mock-vendor-ok', ['tools/mock-vendor-camera.js', String(vendorPort)]);
+    start('app-fallback', ['server/index.js'], {
+      PORT: String(appPort), HOST: '127.0.0.1',
+      VENDOR_HTTP_PORT: String(vendorPort),
+      FFMPEG_PATH: path.resolve('tools/fake-ffmpeg.mjs'),
+    });
+    const fbBase = `http://127.0.0.1:${appPort}`;
+    const up = await waitForPort(`${fbBase}/api/health`);
+    check('fallback app started', up);
+
+    if (up) {
+      // The vendor mock only accepts password "admin", and the ONVIF mock
+      // accepts anything, so one credential pair drives both.
+      const conn = await fetch(`${fbBase}/api/connect`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: '127.0.0.1', port: onvifPort, username: 'admin', password: 'admin' }),
+      });
+      const sess = await conn.json();
+      check('fallback session connects', typeof sess.sessionId === 'string', JSON.stringify(sess).slice(0, 160));
+
+      if (sess.sessionId) {
+        const prof = sess.profiles?.[0]?.token;
+        const patch = await fetch(`${fbBase}/api/session/${sess.sessionId}/imaging`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profile: prof, settings: { brightness: 77 } }),
+        });
+        const body = await patch.json();
+        check('imaging patch succeeds via fallback', patch.status === 200, JSON.stringify(body).slice(0, 200));
+        check('result is attributed to the vendor driver', body.source === 'vatilon',
+          `source=${body.source}`);
+        check('vendor driver name is surfaced', typeof body.driver === 'string' && body.driver.length > 0,
+          `driver=${body.driver}`);
+        check('the value the ONVIF path refused is now applied',
+          body.applied?.brightness === true, JSON.stringify(body.applied));
+        check('the device reports the requested value', body.settings?.brightness === 77,
+          `brightness=${body.settings?.brightness}`);
+
+        // A camera whose ONVIF works must NOT be routed to a vendor driver.
+        const okConn = await fetch(`${fbBase}/api/connect`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host: '127.0.0.1', port: MOCK_PORT, username: 'admin', password: 'admin' }),
+        });
+        const okSess = await okConn.json();
+        if (okSess.sessionId) {
+          const okPatch = await fetch(`${fbBase}/api/session/${okSess.sessionId}/imaging`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ profile: okSess.profiles?.[0]?.token, settings: { brightness: 90 } }),
+          });
+          const okBody = await okPatch.json();
+          check('a working ONVIF camera stays on the ONVIF path',
+            okBody.source === 'onvif', `source=${okBody.source}`);
+        }
+      }
+    }
+  }
+
   console.log('\nStatic assets');
   for (const asset of ['/', '/js/app.js', '/js/player.js', '/js/spring.js', '/styles/tokens.css', '/styles/app.css', '/styles/player.css', '/styles/imaging.css']) {
     const res = await fetch(`${BASE}${asset}`);
