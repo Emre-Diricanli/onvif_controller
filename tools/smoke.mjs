@@ -660,6 +660,102 @@ async function main() {
     }
   }
 
+
+  console.log('\nMulti-channel recorder (DVR/NVR)');
+  {
+    // The bug this feature exists to prevent: on a recorder, a per-channel
+    // setting that cannot resolve its channel silently lands on channel 1, the
+    // write genuinely succeeds, and read-back confirms it. The operator is told
+    // it worked. Prove that no longer happens.
+    const dvrPort = MOCK_PORT + 50;
+    start('mock-dvr', ['tools/mock-camera.js', String(dvrPort)], { MOCK_CHANNELS: '8' });
+    await delay(1500);
+
+    const conn = await fetch(`${BASE}/api/connect`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: '127.0.0.1', port: dvrPort, username: 'admin', password: 'admin' }),
+    });
+    const dvr = await conn.json();
+    check('recorder connects', typeof dvr.sessionId === 'string', JSON.stringify(dvr).slice(0, 180));
+
+    if (dvr.sessionId) {
+      check('recorder is flagged multi-channel', dvr.isMultiChannel === true, `isMultiChannel=${dvr.isMultiChannel}`);
+      check('every channel is enumerated as a source',
+        Array.isArray(dvr.sources) && dvr.sources.length === 8, `sources=${dvr.sources?.length}`);
+      check('each source carries its own profiles',
+        dvr.sources?.every((s) => Array.isArray(s.profiles) && s.profiles.length >= 1),
+        JSON.stringify(dvr.sources?.[0]).slice(0, 160));
+      check('each source has a label', dvr.sources?.every((s) => typeof s.label === 'string' && s.label), 
+        JSON.stringify(dvr.sources?.map((s) => s.label)).slice(0, 160));
+      check('PTZ support is reported per source, not per device',
+        new Set(dvr.sources?.map((s) => s.ptzSupported)).size > 1,
+        'the mock gives some channels PTZ and not others: ' + JSON.stringify(dvr.sources?.map((s) => s.ptzSupported)));
+
+      // Profiles must not be silently collapsed onto one channel.
+      const tokens = new Set(dvr.sources?.flatMap((s) => s.profiles.map((p) => p.token)));
+      check('no profile is shared between channels',
+        tokens.size === dvr.sources.reduce((n, s) => n + s.profiles.length, 0),
+        `${tokens.size} unique profile tokens`);
+
+      // THE CORE SAFETY CHECK: write to a late channel, assert channel 1 is untouched.
+      const ch7 = dvr.sources?.[6];
+      const ch7Profile = ch7?.profiles?.[0]?.token;
+      if (ch7Profile) {
+        const calls = () => fetch(`http://127.0.0.1:${dvrPort}/__calls`).then((r) => r.json());
+        await fetch(`http://127.0.0.1:${dvrPort}/__reset`, { method: 'POST' });
+        const wrote = await fetch(`${BASE}/api/session/${dvr.sessionId}/imaging`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profile: ch7Profile, settings: { brightness: 77 } }),
+        });
+        const wroteBody = await wrote.json();
+        const after = await calls();
+        check('a channel 7 imaging write reaches channel 7',
+          (after['imaging.set.ch7'] ?? 0) >= 1, JSON.stringify(after));
+        check('a channel 7 write does NOT touch channel 1',
+          (after['imaging.set.ch1'] ?? 0) === 0,
+          'this is the silent wrong-channel bug: ' + JSON.stringify(after));
+        check('the channel 7 write reports the value it set',
+          wroteBody.settings?.brightness === 77, JSON.stringify(wroteBody.settings).slice(0, 120));
+      }
+
+      // An omitted profile on a recorder must refuse, not default to channel 1.
+      const guessed = await fetch(`${BASE}/api/session/${dvr.sessionId}/imaging`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ settings: { brightness: 200 } }),
+      });
+      const guessedBody = await guessed.json();
+      check('an omitted channel is refused rather than guessed',
+        guessed.status >= 400 && Boolean(guessedBody.error),
+        `status=${guessed.status} ${JSON.stringify(guessedBody).slice(0, 150)}`);
+
+      await fetch(`${BASE}/api/session/${dvr.sessionId}/disconnect`, { method: 'POST' });
+    }
+  }
+
+  console.log('\nSingle-camera behaviour is unchanged');
+  {
+    // Adaptive means a normal camera must look exactly as it did before.
+    const solo = await fetch(`${BASE}/api/connect`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: '127.0.0.1', port: MOCK_PORT, username: 'admin', password: 'admin' }),
+    });
+    const one = await solo.json();
+    check('a single camera is not flagged multi-channel', one.isMultiChannel === false,
+      `isMultiChannel=${one.isMultiChannel}`);
+    check('a single camera still reports exactly one source',
+      Array.isArray(one.sources) && one.sources.length === 1, `sources=${one.sources?.length}`);
+    if (one.sessionId) {
+      // The convenience default must survive for one-camera devices.
+      const noProfile = await fetch(`${BASE}/api/session/${one.sessionId}/imaging`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ settings: { brightness: 120 } }),
+      });
+      check('a single camera still accepts an omitted profile', noProfile.status === 200,
+        `status=${noProfile.status}`);
+      await fetch(`${BASE}/api/session/${one.sessionId}/disconnect`, { method: 'POST' });
+    }
+  }
+
   console.log('\nStatic assets');
   for (const asset of ['/', '/js/app.js', '/js/player.js', '/js/spring.js', '/styles/tokens.css', '/styles/app.css', '/styles/player.css', '/styles/imaging.css']) {
     const res = await fetch(`${BASE}${asset}`);

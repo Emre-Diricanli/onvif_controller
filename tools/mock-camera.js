@@ -180,6 +180,80 @@ function encoderOptionsXml(token) {
     + '</trt:Options></trt:GetVideoEncoderConfigurationOptionsResponse>');
 }
 
+/**
+ * Multi-channel (DVR / NVR) emulation.
+ *
+ * MOCK_CHANNELS=N makes this device report N video sources and 2*N media
+ * profiles, the way a recorder does. Default 1, which replays the original
+ * single-camera fixtures unchanged so every existing test keeps its meaning.
+ *
+ * Channel 1 deliberately gets PTZ and imaging while later channels vary, because
+ * the failure this whole feature exists to prevent is a per-channel setting
+ * silently landing on channel 1.
+ */
+const CHANNELS = Math.max(1, Number(process.env.MOCK_CHANNELS ?? 1));
+
+/** Per-channel imaging, so a write to the wrong channel is detectable. */
+const channelImaging = Array.from({ length: CHANNELS }, () => ({
+  Brightness: 128, ColorSaturation: 128, Contrast: 128, Sharpness: 128,
+}));
+
+const chSourceToken = (i) => `VideoSource_${i + 1}`;
+const chMainProfile = (i) => `Profile_ch${i + 1}_main`;
+const chSubProfile  = (i) => `Profile_ch${i + 1}_sub`;
+/** Channel 1 has PTZ; every third channel after that does not. */
+const chHasPtz = (i) => i === 0 || (i % 3 !== 2);
+
+function multiVideoSourcesXml() {
+  const sources = Array.from({ length: CHANNELS }, (_, i) =>
+    `<trt:VideoSources token="${chSourceToken(i)}">`
+    + `<tt:Framerate>25</tt:Framerate>`
+    + `<tt:Resolution><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:Resolution>`
+    + `</trt:VideoSources>`).join('');
+  return soapEnvelope(`<trt:GetVideoSourcesResponse>${sources}</trt:GetVideoSourcesResponse>`);
+}
+
+function profileXml(i, sub) {
+  const token = sub ? chSubProfile(i) : chMainProfile(i);
+  const name = `Channel ${i + 1} ${sub ? 'Sub' : 'Main'}`;
+  const w = sub ? 640 : 1920;
+  const h = sub ? 480 : 1080;
+  return `<trt:Profiles token="${token}" fixed="true">`
+    + `<tt:Name>${name}</tt:Name>`
+    + `<tt:VideoSourceConfiguration token="VideoSourceConfig_${i + 1}">`
+    + `<tt:Name>VideoSourceConfig ${i + 1}</tt:Name><tt:UseCount>2</tt:UseCount>`
+    + `<tt:SourceToken>${chSourceToken(i)}</tt:SourceToken>`
+    + `<tt:Bounds x="0" y="0" width="${w}" height="${h}"/>`
+    + `</tt:VideoSourceConfiguration>`
+    + `<tt:VideoEncoderConfiguration token="Enc_${i + 1}_${sub ? 'sub' : 'main'}">`
+    + `<tt:Name>${name}</tt:Name><tt:UseCount>1</tt:UseCount><tt:Encoding>H264</tt:Encoding>`
+    + `<tt:Resolution><tt:Width>${w}</tt:Width><tt:Height>${h}</tt:Height></tt:Resolution>`
+    + `<tt:Quality>4</tt:Quality>`
+    + `<tt:RateControl><tt:FrameRateLimit>25</tt:FrameRateLimit>`
+    + `<tt:EncodingInterval>1</tt:EncodingInterval><tt:BitrateLimit>${sub ? 512 : 4096}</tt:BitrateLimit></tt:RateControl>`
+    + `</tt:VideoEncoderConfiguration>`
+    + (chHasPtz(i)
+        ? `<tt:PTZConfiguration token="PTZConfig_${i + 1}"><tt:Name>PTZ ${i + 1}</tt:Name>`
+          + `<tt:UseCount>1</tt:UseCount><tt:NodeToken>PTZNode_${i + 1}</tt:NodeToken></tt:PTZConfiguration>`
+        : '')
+    + `</trt:Profiles>`;
+}
+
+function multiProfilesXml() {
+  const all = [];
+  for (let i = 0; i < CHANNELS; i += 1) { all.push(profileXml(i, false), profileXml(i, true)); }
+  return soapEnvelope(`<trt:GetProfilesResponse>${all.join('')}</trt:GetProfilesResponse>`);
+}
+
+/** Which channel a request is talking about, from a source or profile token. */
+function channelIndexFor(body) {
+  const src = body.match(/VideoSource_(\d+)/);
+  if (src) return Number(src[1]) - 1;
+  const prof = body.match(/Profile_ch(\d+)_/);
+  if (prof) return Number(prof[1]) - 1;
+  return null;
+}
+
 const imagingState = { Brightness: 255, ColorSaturation: 128, Contrast: 128, Sharpness: 128 };
 const ORIGINAL_IMAGING = { ...imagingState };
 const REPORTED_IMAGING_FIELDS = ['Brightness', 'ColorSaturation', 'Contrast', 'Focus', 'Sharpness'];
@@ -318,6 +392,47 @@ if (op === 'GetVideoEncoderConfigurationOptions') {
       return;
     }
 
+// --- Multi-channel emulation, only when MOCK_CHANNELS > 1 ---
+    if (CHANNELS > 1) {
+      if (op === 'GetVideoSources') {
+        res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+        res.end(multiVideoSourcesXml());
+        return;
+      }
+      if (op === 'GetProfiles') {
+        res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+        res.end(multiProfilesXml());
+        return;
+      }
+      if (op === 'GetImagingSettings' || op === 'SetImagingSettings') {
+        const idx = channelIndexFor(body);
+        // A recorder rejects an imaging request that names no channel rather
+        // than quietly serving channel 1.
+        if (idx === null || idx < 0 || idx >= CHANNELS) {
+          res.writeHead(400, { 'Content-Type': 'application/soap+xml' });
+          res.end(fault('No such video source', 'ter:InvalidArgVal'));
+          return;
+        }
+        const st = channelImaging[idx];
+        if (op === 'SetImagingSettings') {
+          callCounts[`imaging.set.ch${idx + 1}`] = (callCounts[`imaging.set.ch${idx + 1}`] ?? 0) + 1;
+          for (const field of Object.keys(st)) {
+            const v = valueIn(body, field);
+            if (v !== null) st[field] = v;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+          res.end(soapEnvelope('<timg:SetImagingSettingsResponse xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"/>'));
+          return;
+        }
+        callCounts[`imaging.get.ch${idx + 1}`] = (callCounts[`imaging.get.ch${idx + 1}`] ?? 0) + 1;
+        res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+        res.end(soapEnvelope('<timg:GetImagingSettingsResponse xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"><timg:ImagingSettings>'
+          + Object.entries(st).map(([k, v]) => `<tt:${k} xmlns:tt="http://www.onvif.org/ver10/schema">${v}</tt:${k}>`).join('')
+          + '</timg:ImagingSettings></timg:GetImagingSettingsResponse>'));
+        return;
+      }
+    }
+
     if (service === 'imaging' && op === 'GetImagingSettings') {
       res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
       res.end(imagingSettingsResponse());
@@ -393,5 +508,6 @@ server.listen(PORT, HOST, () => {
   console.log('  MOCK_REJECT_AUTH=1 to test the 401 path, MOCK_SKEW_SECONDS=600 to test clock skew.');
   console.log(`  Imaging mode: ${IMAGING_MODE} (MOCK_IMAGING_MODE=ignore|clamp).`);
   console.log(`  Encoder mode: ${ENCODER_MODE} (MOCK_ENCODER_MODE=ignore).`);
+  console.log(`  Channels: ${CHANNELS} (MOCK_CHANNELS=16 to emulate a DVR).`);
   console.log(`  Network mode: ${NETWORK_MODE} (MOCK_NETWORK_MODE=ignore).`);
 });
