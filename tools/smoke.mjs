@@ -238,9 +238,84 @@ async function playbackProbeChecks() {
   check('a failed search step is reported as failed, not ok', failedStep.status === 'failed', JSON.stringify(failedStep));
 }
 
+/**
+ * Fan-out delivery guarantees. These are bounds, not features: a camera in a
+ * motion storm must not be able to exhaust memory, and a dead edge box must not
+ * be hammered. Each check corresponds to a line in FANOUT.md "Definition of done".
+ */
+async function fanoutDeliveryChecks() {
+  console.log('\nFan-out delivery');
+  const { TargetDeliverer, FanoutDispatcher, __testing } = await import('../server/fanout/delivery.js');
+  const settle = (ms = 60) => delay(ms);
+
+  check('a 5xx is retryable', __testing.isRetryable(503));
+  check('a 4xx is not retried', !__testing.isRetryable(400), 'a rejected payload will never succeed on retry');
+  check('429 and 408 are retried', __testing.isRetryable(429) && __testing.isRetryable(408));
+
+  // Queue overflow drops the OLDEST and counts it: bounded memory, visible loss.
+  const overflow = new TargetDeliverer({ id: 'q', url: 'http://x', delivery: { queueSize: 3, concurrency: 0 } },
+    { send: async () => ({ ok: true, status: 200 }) });
+  for (let i = 0; i < 10; i += 1) overflow.enqueue({ id: `e${i}` });
+  check('queue is bounded under a storm', overflow.stats().queued === 3, `queued ${overflow.stats().queued}`);
+  check('overflow drops are counted, never silent', overflow.stats().droppedQueueFull === 7);
+  check('the newest events are the ones kept', overflow.queue.at(-1).id === 'e9');
+
+  // A dead target must stop being contacted rather than being hammered.
+  let attempts = 0;
+  const dead = new TargetDeliverer(
+    { id: 'dead', url: 'http://dead', delivery: { maxAttempts: 1, breakerThreshold: 3, breakerCooldownMs: 60000, baseBackoffMs: 1 } },
+    { send: async () => { attempts += 1; throw new Error('ECONNREFUSED'); } });
+  for (let i = 0; i < 3; i += 1) { dead.enqueue({ id: `f${i}` }); await settle(25); }
+  check('repeated failures trip the circuit breaker', dead.stats().breakerOpen === true);
+  const before = attempts;
+  for (let i = 0; i < 50; i += 1) dead.enqueue({ id: `storm${i}` });
+  await settle();
+  check('an open breaker sends nothing at all', attempts === before, `${attempts - before} requests leaked through`);
+  check('events dropped by the breaker are counted', dead.stats().droppedBreakerOpen >= 50);
+  check('the receiver error text is surfaced for diagnosis', /ECONNREFUSED/.test(dead.stats().lastError ?? ''));
+
+  // A hung receiver must not pin a delivery slot forever.
+  const hung = new TargetDeliverer(
+    { id: 'hung', url: 'http://hung', delivery: { maxAttempts: 1, timeoutMs: 100, concurrency: 2, baseBackoffMs: 1 } },
+    { send: (_t, _p, signal) => new Promise((_res, rej) => signal.addEventListener('abort', () => rej(new Error('aborted')))) });
+  for (let i = 0; i < 6; i += 1) hung.enqueue({ id: `h${i}` });
+  check('concurrency is capped', hung.inFlight === 2, `inFlight ${hung.inFlight}`);
+  await settle(600);
+  check('a hung receiver times out instead of blocking', hung.stats().failed === 6 && hung.stats().queued === 0);
+
+  // One broken target must not affect the others, and must never throw into
+  // the ONVIF event listener.
+  const delivered = [];
+  const dispatcher = new FanoutDispatcher({ send: async (t) => { delivered.push(t.id); return { ok: true, status: 200 }; } });
+  dispatcher.setTargets([
+    { id: 'good', url: 'http://a', enabled: true },
+    { id: 'bad', url: 'http://b', enabled: true },
+    { id: 'off', url: 'http://c', enabled: false },
+  ]);
+  let threw = false;
+  try {
+    dispatcher.dispatch({ topic: 'x' }, (target) => {
+      if (target.id === 'bad') throw new Error('payload boom');
+      return { id: 'e1', headers: {}, body: '{}' };
+    });
+  } catch { threw = true; }
+  await settle();
+  check('a failing target never throws into the event listener', threw === false);
+  check('a failing target does not stop the others', delivered.includes('good') && !delivered.includes('bad'));
+  check('a disabled target receives nothing', !delivered.includes('off'));
+
+  // Reloading config must not silently reset breaker state and counters.
+  dispatcher.deliverers.get('good').counters.delivered = 7;
+  dispatcher.setTargets([{ id: 'good', url: 'http://a', enabled: true, delivery: { concurrency: 8 } }]);
+  check('a config reload preserves delivery state', dispatcher.deliverers.get('good').counters.delivered === 7);
+  check('a removed target is torn down', dispatcher.deliverers.size === 1);
+  dispatcher.close();
+}
+
 async function main() {
   await profileDescriptionChecks();
   await playbackProbeChecks();
+  await fanoutDeliveryChecks();
   console.log('Starting mock camera and app server...');
   start('mock', ['tools/mock-camera.js', String(MOCK_PORT)]);
   start('app', ['server/index.js'], {
