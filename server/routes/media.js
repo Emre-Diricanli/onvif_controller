@@ -5,6 +5,7 @@ import { requireSession, requireProfile } from '../sessions.js';
 import { redactUri } from '../onvif/util.js';
 import { startStream, stopStream } from '../stream/pipeline.js';
 import { fetchSnapshot } from '../stream/snapshot.js';
+import { readEncoder, writeEncoder } from '../onvif/encoder.js';
 
 const router = Router({ mergeParams: true });
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -52,6 +53,19 @@ router.get('/snapshot', wrap(async (req, res) => {
   res.set('Content-Type', contentType || 'image/jpeg');
   res.set('Cache-Control', 'no-store');
   res.send(body);
+}));
+
+router.get('/encoder', wrap(async (req, res) => {
+  const session = requireSession(req.params.id);
+  const profileToken = requireProfile(session, req.query?.profile);
+  res.json(await readEncoder(session, profileToken));
+}));
+
+router.patch('/encoder', wrap(async (req, res) => {
+  const session = requireSession(req.params.id);
+  const profileToken = requireProfile(session, req.body?.profile);
+  const result = await writeEncoder(session, profileToken, req.body?.settings);
+  res.json({ ...result, streamRestartRequired: true });
 }));
 
 router.post('/stream/start', wrap(async (req, res) => {
