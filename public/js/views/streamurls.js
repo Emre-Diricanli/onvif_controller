@@ -4,7 +4,7 @@
 // the credentialed one only appears when the operator asks for it, so a camera
 // password is never sitting on screen during a screen-share by accident.
 
-import { api, ApiError } from '../api.js';
+import { ApiError } from '../api.js';
 
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
@@ -39,7 +39,7 @@ async function copyText(text) {
   return ok;
 }
 
-export function renderStreamUrls(container, { sessionId, onError }) {
+export function renderStreamUrls(container, { sessionId, profile, onError }) {
   const cleanups = [];
   let destroyed = false;
   let showCredentials = false;
@@ -59,11 +59,13 @@ export function renderStreamUrls(container, { sessionId, onError }) {
     'Hidden by default so a camera password is not left on screen. Revealing it fetches the URL with the username and password embedded.');
   credRow.append(credToggle, credNote);
 
-  function row(entry) {
+  function row(entry, duplicateMetadata) {
     const item = el('div', 'stream-url-item');
 
     const head = el('div', 'stream-url-head');
-    head.appendChild(el('span', 'stream-url-name', entry.name || entry.token));
+    const name = entry.name || entry.token;
+    head.appendChild(el('span', 'stream-url-name',
+      duplicateMetadata ? `${name} (${entry.token})` : name));
     const meta = [entry.codec, entry.resolution].filter(Boolean).join(' · ');
     if (meta) head.appendChild(el('span', 'stream-url-meta', meta));
     item.appendChild(head);
@@ -110,7 +112,18 @@ export function renderStreamUrls(container, { sessionId, onError }) {
 
   async function load() {
     try {
-      const res = await api.getStreamUrls(sessionId, showCredentials);
+      // api.getStreamUrls predates channel selection, so use the same API error
+      // envelope while including the profile the controller already supplies.
+      const params = new URLSearchParams({ profile });
+      if (showCredentials) params.set('credentials', 'true');
+      const response = await fetch(`/api/session/${encodeURIComponent(sessionId)}/stream-urls?${params}`);
+      const res = await response.json();
+      if (!response.ok) {
+        const error = res?.error ?? {};
+        throw new ApiError(error.code || 'INTERNAL',
+          error.message || `Request failed with status ${response.status}.`,
+          error.hint ?? null, response.status);
+      }
       if (destroyed) return;
       list.replaceChildren();
       if (!res.urls || res.urls.length === 0) {
@@ -121,7 +134,15 @@ export function renderStreamUrls(container, { sessionId, onError }) {
       }
       status.hidden = true;
       credRow.hidden = false;
-      for (const entry of res.urls) list.appendChild(row(entry));
+      const metadataCounts = new Map();
+      for (const entry of res.urls) {
+        const key = JSON.stringify([entry.name || entry.token, entry.codec, entry.resolution]);
+        metadataCounts.set(key, (metadataCounts.get(key) ?? 0) + 1);
+      }
+      for (const entry of res.urls) {
+        const key = JSON.stringify([entry.name || entry.token, entry.codec, entry.resolution]);
+        list.appendChild(row(entry, metadataCounts.get(key) > 1));
+      }
       if (!wrap.contains(credRow)) wrap.appendChild(credRow);
     } catch (err) {
       if (destroyed) return;

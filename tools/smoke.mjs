@@ -697,6 +697,36 @@ async function main() {
         tokens.size === dvr.sources.reduce((n, s) => n + s.profiles.length, 0),
         `${tokens.size} unique profile tokens`);
 
+      const channel = dvr.sources?.[3];
+      const otherChannel = dvr.sources?.[4];
+      const channelProfile = channel?.profiles?.[0]?.token;
+      if (channelProfile) {
+        const scopedRes = await fetch(`${BASE}/api/session/${dvr.sessionId}/stream-urls?profile=${encodeURIComponent(channelProfile)}`);
+        const scoped = await scopedRes.json();
+        const scopedTokens = new Set(scoped.urls?.map((entry) => entry.token));
+        check('stream URLs are scoped to the requested channel',
+          channel.profiles.every((entry) => scopedTokens.has(entry.token)), JSON.stringify(scoped.urls));
+        check('stream URLs exclude another channel',
+          otherChannel.profiles.every((entry) => !scopedTokens.has(entry.token)), JSON.stringify(scoped.urls));
+        check('stream URL count matches the channel profile count',
+          scoped.urls?.length === channel.profiles.length && scoped.urls.length < dvr.profiles.length,
+          `urls=${scoped.urls?.length} channel=${channel.profiles.length} device=${dvr.profiles.length}`);
+        check('stream URL entries carry codec and resolution',
+          scoped.urls?.every((entry) => entry.codec && entry.resolution), JSON.stringify(scoped.urls));
+        check('stream URL credentials remain opt-in',
+          scoped.credentialsIncluded === false
+            && scoped.urls?.every((entry) => entry.rtspWithCredentials === null && !/@/.test(entry.rtsp ?? '')),
+          JSON.stringify(scoped));
+
+        const credentialed = await (await fetch(
+          `${BASE}/api/session/${dvr.sessionId}/stream-urls?profile=${encodeURIComponent(channelProfile)}&credentials=true`,
+        )).json();
+        check('explicit credential request returns credentialed stream URLs',
+          credentialed.credentialsIncluded === true
+            && credentialed.urls?.every((entry) => !entry.rtsp || /@/.test(entry.rtspWithCredentials ?? '')),
+          JSON.stringify(credentialed));
+      }
+
       // THE CORE SAFETY CHECK: write to a late channel, assert channel 1 is untouched.
       const ch7 = dvr.sources?.[6];
       const ch7Profile = ch7?.profiles?.[0]?.token;
@@ -745,6 +775,10 @@ async function main() {
     check('a single camera still reports exactly one source',
       Array.isArray(one.sources) && one.sources.length === 1, `sources=${one.sources?.length}`);
     if (one.sessionId) {
+      const legacyUrls = await (await fetch(`${BASE}/api/session/${one.sessionId}/stream-urls`)).json();
+      check('single-camera stream URLs are unchanged when profile is omitted',
+        legacyUrls.urls?.length === one.profiles?.length,
+        `urls=${legacyUrls.urls?.length} profiles=${one.profiles?.length}`);
       // The convenience default must survive for one-camera devices.
       const noProfile = await fetch(`${BASE}/api/session/${one.sessionId}/imaging`, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' },

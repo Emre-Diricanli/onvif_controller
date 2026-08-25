@@ -30,8 +30,29 @@ router.get('/profiles', wrap(async (req, res) => {
 router.get('/stream-urls', wrap(async (req, res) => {
   const session = requireSession(req.params.id);
   const includeCredentials = req.query?.credentials === 'true';
+  let profiles = session.profiles;
 
-  const urls = session.profiles.map((p) => {
+  if (req.query?.profile !== undefined) {
+    const profileToken = requireProfile(session, req.query.profile);
+    const selected = session.profileMap.get(profileToken);
+    const sourceToken = selected?.videoSourceToken;
+
+    if (sourceToken) {
+      profiles = session.profiles.filter((profile) =>
+        session.profileMap.get(profile.token)?.videoSourceToken === sourceToken);
+    } else {
+      // Some single cameras omit SourceToken even though GetVideoSources makes
+      // the grouping unambiguous. Reuse that resolved source, but never group
+      // missing tokens together on a recorder.
+      const source = session.sources?.find((candidate) =>
+        candidate.profiles?.some((profile) => profile.token === profileToken));
+      profiles = session.sources?.length === 1 && source
+        ? source.profiles
+        : session.profiles.filter((profile) => profile.token === profileToken);
+    }
+  }
+
+  const urls = profiles.map((p) => {
     const internal = session.profileMap.get(p.token);
     return {
       token: p.token,
