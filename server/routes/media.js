@@ -5,6 +5,8 @@ import { requireSession, requireProfile } from '../sessions.js';
 import { redactUri } from '../onvif/util.js';
 import { startStream, stopStream } from '../stream/pipeline.js';
 import { fetchSnapshot } from '../stream/snapshot.js';
+import { readEncoder, writeEncoder } from '../onvif/encoder.js';
+import { reconfigureStreams, willDisruptStream, isDisruptiveChange } from '../stream/reconfigure.js';
 
 const router = Router({ mergeParams: true });
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -52,6 +54,31 @@ router.get('/snapshot', wrap(async (req, res) => {
   res.set('Content-Type', contentType || 'image/jpeg');
   res.set('Cache-Control', 'no-store');
   res.send(body);
+}));
+
+router.get('/encoder', wrap(async (req, res) => {
+  const session = requireSession(req.params.id);
+  const profileToken = requireProfile(session, req.query?.profile);
+  res.json(await readEncoder(session, profileToken));
+}));
+
+router.patch('/encoder', wrap(async (req, res) => {
+  const session = requireSession(req.params.id);
+  const profileToken = requireProfile(session, req.body?.profile);
+  const patch = req.body?.settings;
+
+  // Whether this disrupts anything has to be decided BEFORE the write, because
+  // the rebuild below removes the very stream we are asking about.
+  const disruptive = isDisruptiveChange(patch) && willDisruptStream(session.id, profileToken);
+
+  const result = await writeEncoder(session, profileToken, patch);
+
+  // Only resolution and codec invalidate the init segment the browser primed
+  // MSE with. A bitrate or GOP nudge does not, and forcing a visible restart
+  // for one would be a worse experience than leaving the stream running.
+  const restarted = reconfigureStreams(session.id, profileToken, patch);
+
+  res.json({ ...result, streamRestartRequired: disruptive, streamsRestarted: restarted });
 }));
 
 router.post('/stream/start', wrap(async (req, res) => {
