@@ -17,6 +17,7 @@ import { renderImaging } from './imaging.js';
 import { renderEvents } from './events.js';
 import { renderStreamUrls } from './streamurls.js';
 import { renderNetwork } from './network.js';
+import { renderEncoder } from './encoder.js';
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -481,6 +482,27 @@ export function renderController(root, { session, onDisconnect }) {
       name: 'Events',
       available: () => Boolean(session.capabilities && session.capabilities.events),
       build: (c) => renderEvents(c, { sessionId: session.sessionId, onError: showError }),
+    },
+    {
+      name: 'Video',
+      // Any profile with an encoder configuration can be reconfigured.
+      available: () => Array.isArray(session.profiles) && session.profiles.length > 0,
+      build: (c) => renderEncoder(c, {
+        sessionId: session.sessionId,
+        profile: currentProfile,
+        onError: showError,
+        onApplied: (response) => {
+          // The encoder changed under the running pipeline. The server has
+          // already torn it down; rebuild the client side from a fresh init
+          // segment rather than letting MSE reject every incoming fragment.
+          if (response?.streamRestartRequired && currentProfile) {
+            player.stop();
+            player.start(currentProfile).catch((err) => showError(
+              err instanceof ApiError ? err : new ApiError('STREAM_FAILED', String(err)),
+            ));
+          }
+        },
+      }),
     },
     {
       name: 'Stream URLs',
