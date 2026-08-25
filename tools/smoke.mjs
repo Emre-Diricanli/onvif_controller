@@ -160,8 +160,81 @@ async function profileDescriptionChecks() {
       && JSON.stringify([...singleConcurrent.profileMap]) === JSON.stringify([...singleSerial.profileMap]));
 }
 
+/**
+ * Profile G probe checks that need no device at all. The safety properties here
+ * matter more than the feature ones: the probe reaches a recorder holding an
+ * operator's only copy of their footage, so "never mutates" and "never claims
+ * unobserved support" are asserted directly rather than left to review.
+ */
+async function playbackProbeChecks() {
+  console.log('\nPlayback probe (Profile G)');
+  const { probePlayback } = await import('../server/onvif/playback.js');
+
+  const envelope = { _envelopeHeader: () => '<E>', _envelopeFooter: () => '</E>' };
+  const svc = (ns, path) => ({ namespace: `http://www.onvif.org/${ns}/wsdl`, XAddr: `http://192.168.99.9/onvif/${path}` });
+
+  // A camera with no Profile G is a complete answer, not an error.
+  const bare = await probePlayback({ cam: { services: [], uri: {}, ...envelope }, host: '10.0.0.1', timeoutMs: 300, sources: [] }, {});
+  check('probe on a non-recorder concludes cleanly', /no ONVIF Profile G service/i.test(bare.conclusion));
+  check('probe on a non-recorder claims no capability', Object.values(bare.services).every((s) => s.present === false));
+
+  // Every SOAP body the probe sends must be non-mutating.
+  const sent = [];
+  const recorder = {
+    ...envelope,
+    services: [svc('ver10/recording', 'recording'), svc('ver10/replay', 'replay'), svc('ver10/search', 'search')],
+    uri: {},
+    _request: (opts, cb) => {
+      sent.push(opts.body);
+      if (/FindRecordings|FindEvents/.test(opts.body)) return cb(null, { searchToken: 'TOK-1' }, '');
+      if (/GetRecordingSearchResults|GetEventSearchResults/.test(opts.body)) return cb(new Error('search backend offline'));
+      return cb(null, {}, '');
+    },
+    getRecordingServiceCapabilities: (cb) => cb(null, { dynamicRecordings: false }),
+    getRecordingSummary: (cb) => cb(null, { dataFrom: '2026-08-24T00:00:00Z', dataUntil: '2026-08-25T00:00:00Z' }),
+    getRecordings: (cb) => cb(null, [{
+      recordingToken: 'REC1',
+      configuration: { source: { sourceId: 'SRC_CH1', name: 'Front Door' } },
+      tracks: { track: [] },
+    }]),
+    getReplayUri: (_o, cb) => cb(null, { uri: 'rtsp://admin:hunter2@192.168.99.9:554/replay/REC1' }),
+  };
+  const session = {
+    cam: recorder, host: '10.1.10.70', timeoutMs: 500,
+    sources: [{ token: 'VideoSource_1', label: 'Channel 1', profiles: [{ token: 'P1' }] }],
+  };
+  const report = await probePlayback(session, {});
+
+  check('probe issues no mutating recording call',
+    !sent.some((body) => /<\s*(?:\w+:)?(Create|Delete|Set|Remove)[A-Za-z]*/.test(body)),
+    sent.filter((b) => /<\s*(?:\w+:)?(Create|Delete|Set)/.test(b)).join(' | '));
+
+  // A search that fails midway must still be ended, or the recorder leaks handles.
+  const started = sent.filter((b) => /<FindRecordings|<FindEvents/.test(b)).length;
+  const ended = sent.filter((b) => /<EndSearch/.test(b)).length;
+  check('every opened search is ended even when results fail', started > 0 && ended === started, `started ${started}, ended ${ended}`);
+
+  // The bug this probe exists to catch: recording sources and profile video
+  // source tokens live in different namespaces and must never be assumed equal.
+  check('mismatched recording source is not silently mapped to a profile', report.channelMapping.derivable === false);
+  check('unmapped recording is reported by token', report.channelMapping.unmatchedRecordings.includes('REC1'));
+  check('conclusion warns that channel mapping is not derivable', /could not be mapped/i.test(report.conclusion));
+
+  // Credentials must not survive into a report an operator pastes into a ticket.
+  const serialized = JSON.stringify(report);
+  check('replay URI is redacted in the report', !serialized.includes('hunter2'));
+
+  // Host pinning: a recorder reports its own LAN address, which we cannot reach.
+  check('service URL is pinned to the address the operator typed', report.services.recording.url.includes('10.1.10.70'));
+
+  // A step that never ran must not read as a passing step.
+  const failedStep = report.steps.find((s) => s.step === 'findRecordings');
+  check('a failed search step is reported as failed, not ok', failedStep.status === 'failed', JSON.stringify(failedStep));
+}
+
 async function main() {
   await profileDescriptionChecks();
+  await playbackProbeChecks();
   console.log('Starting mock camera and app server...');
   start('mock', ['tools/mock-camera.js', String(MOCK_PORT)]);
   start('app', ['server/index.js'], {
