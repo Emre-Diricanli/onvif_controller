@@ -15,7 +15,7 @@
 // stopped. Stats refresh on a slow interval — these are counters, not a live
 // feed — and the timer stops with the panel.
 
-import { ApiError } from '../api.js';
+import { api } from '../api.js';
 
 const REFRESH_INTERVAL_MS = 4_000;
 
@@ -26,37 +26,6 @@ function el(tag, className, text) {
   return node;
 }
 
-// Same wire contract as api.js: parse the { error: { code, message, hint } }
-// envelope on non-2xx and throw an ApiError. api.js itself carries no fan-out
-// methods; these two endpoints need no session id.
-async function request(method, path, body) {
-  let res;
-  try {
-    res = await fetch(path, {
-      method,
-      headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-  } catch {
-    throw new ApiError(
-      'DEVICE_UNREACHABLE',
-      'The controller server did not answer.',
-      'Check that the server process is running on this machine.',
-      0,
-    );
-  }
-  const data = await res.json().catch(() => null);
-  if (!res.ok) {
-    const err = data && data.error ? data.error : {};
-    throw new ApiError(
-      err.code || 'INTERNAL',
-      err.message || `Request failed with status ${res.status}.`,
-      err.hint !== undefined ? err.hint : null,
-      res.status,
-    );
-  }
-  return data;
-}
 
 function formatTime(isoTime) {
   if (!isoTime) return '';
@@ -144,7 +113,7 @@ export function renderFanout(container, { onError }) {
       result.dataset.state = '';
       result.replaceChildren(el('p', 'fanout-test-line', 'Sending test event…'));
       try {
-        const res = await request('POST', '/api/fanout/test', { id: target.id });
+        const res = await api.testFanout(target.id);
         if (destroyed) return;
         // The receiver's real answer, left on screen: HTTP status, status
         // text, and round-trip time. `response` is arbitrary receiver text —
@@ -288,7 +257,7 @@ export function renderFanout(container, { onError }) {
   async function refresh() {
     if (destroyed) return;
     try {
-      const data = await request('GET', '/api/fanout');
+      const data = await api.getFanout();
       if (destroyed) return;
       pollFailed = false;
       render(data ?? {});

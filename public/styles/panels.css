@@ -1,0 +1,190 @@
+/* panels.css — Fan-out and Playback sidebar panels.
+   Both are read-only reporting surfaces, so the job of this sheet is legibility
+   and hierarchy rather than affordance: the operator is scanning for one bad
+   number among many good ones. */
+
+/* --- shared -------------------------------------------------------------- */
+
+.fanout-note,
+.playback-conclusion {
+  margin: 0 0 var(--space-3);
+  color: var(--text-secondary);
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+.playback-heading,
+.fanout-target-head {
+  font-size: var(--text-sm, 0.8125rem);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-heading);
+  margin: 0 0 var(--space-2);
+}
+
+/* .fanout-stats is a CONTAINER of .kv-row children, not a row itself — styling
+   it as a flex row squeezes each child to a single-character column. */
+.fanout-stats {
+  display: flex;
+  flex-direction: column;
+  font-variant-numeric: tabular-nums;
+}
+
+.playback-detail,
+.playback-service,
+.fanout-filters {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 0.1875rem 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Numbers stay on one line; the label yields space instead of the value. */
+.fanout-stats .kv-value {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.fanout-stats .kv-key {
+  min-width: 0;
+}
+
+.playback-label,
+.playback-detail > :first-child {
+  color: var(--text-secondary);
+}
+
+/* --- Fan-out ------------------------------------------------------------- */
+
+.fanout-targets {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.fanout-target {
+  padding: var(--space-3);
+  border-radius: var(--radius-md, 0.5rem);
+  background: var(--surface-sunken);
+}
+
+.fanout-target-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* A URL can be long and must never force the sidebar to scroll sideways. */
+.fanout-url {
+  flex: 1 1 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--text-xs, 0.6875rem);
+  color: var(--text-secondary);
+}
+
+.fanout-badge {
+  flex: none;
+  font-size: var(--text-xs, 0.6875rem);
+  padding: 0.0625rem 0.4375rem;
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* A tripped breaker is the one thing an operator must not scroll past. */
+.fanout-breaker {
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md, 0.5rem);
+  border-left: 0.1875rem solid var(--danger, #d70015);
+  background: color-mix(in srgb, var(--danger, #d70015) 10%, transparent);
+}
+
+.fanout-breaker-title {
+  font-weight: var(--weight-semibold);
+  color: var(--danger, #d70015);
+}
+
+.fanout-breaker-detail,
+.fanout-config-error {
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.fanout-config-errors {
+  margin-bottom: var(--space-3);
+}
+
+.fanout-actions {
+  margin-top: var(--space-3);
+}
+
+.fanout-test-result {
+  margin-top: var(--space-2);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--text-xs, 0.6875rem);
+  overflow-wrap: anywhere;
+}
+
+.fanout-test-line {
+  color: var(--text-secondary);
+}
+
+.fanout-test-body {
+  color: var(--text-secondary);
+  opacity: 0.85;
+}
+
+/* --- Playback ------------------------------------------------------------ */
+
+.playback-services,
+.playback-recordings,
+.playback-mapping {
+  margin-bottom: var(--space-4);
+}
+
+.playback-service-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.playback-recording {
+  padding: var(--space-2) 0;
+  border-top: 0.0625rem solid var(--hairline, rgba(0, 0, 0, 0.08));
+}
+
+.playback-recording-title {
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+/* Unmappable channels mean a player could show the wrong camera — that is a
+   correctness warning, not a footnote. */
+.playback-mapping-warning {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md, 0.5rem);
+  border-left: 0.1875rem solid var(--warn, #b25000);
+  background: color-mix(in srgb, var(--warn, #b25000) 10%, transparent);
+  color: var(--text);
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+.playback-mapping-status {
+  margin: 0 0 var(--space-2);
+  color: var(--text-secondary);
+}
+
+@media (prefers-contrast: more) {
+  .fanout-breaker,
+  .playback-mapping-warning {
+    border: 0.0625rem solid currentColor;
+  }
+}
