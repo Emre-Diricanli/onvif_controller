@@ -34,6 +34,9 @@ function sourceTokenFor(session, profileToken) {
 
   // Trust the profile only if the device actually lists that source.
   if (claimed && real.includes(claimed)) return claimed;
+  if (real.length > 1) {
+    throw new AppError('UNSUPPORTED', 'A specific channel is required for imaging settings on this multi-channel device.');
+  }
   if (active && real.includes(active)) return active;
   if (real.length > 0) return real[0];
   return claimed ?? active ?? null;

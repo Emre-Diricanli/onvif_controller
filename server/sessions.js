@@ -15,7 +15,7 @@ export function onSessionDestroyed(handler) {
   return () => destroyHandlers.delete(handler);
 }
 
-export function createSession({ host, port, username, password, cam, device, capabilities, profiles, profileMap, ptz }) {
+export function createSession({ host, port, username, password, cam, device, capabilities, profiles, profileMap, sources, isMultiChannel, ptz }) {
   const id = randomUUID();
   const session = {
     id,
@@ -28,6 +28,8 @@ export function createSession({ host, port, username, password, cam, device, cap
     capabilities,
     profiles,
     profileMap,
+    sources,
+    isMultiChannel,
     ptz,
     ctx: { host, port },
     timeoutMs: config.onvifTimeoutMs,
@@ -71,6 +73,9 @@ export function requireSession(id) {
 
 /** Resolve a profile token, defaulting to the first profile when omitted. */
 export function requireProfile(session, token) {
+  if ((token === undefined || token === null) && session.isMultiChannel) {
+    throw new AppError('BAD_REQUEST', 'A profile is required to select a channel on this multi-channel device.');
+  }
   const resolved = token ?? session.profiles[0]?.token;
   if (!resolved || !session.profileMap.has(resolved)) {
     throw new AppError('BAD_REQUEST', `Unknown profile "${token ?? '(none)'}".`);
@@ -117,6 +122,8 @@ export function serializeSession(session, { includeId = false } = {}) {
     device: session.device,
     capabilities: session.capabilities,
     profiles: session.profiles,
+    sources: session.sources,
+    isMultiChannel: session.isMultiChannel,
     ptz: session.ptz,
   };
 }
