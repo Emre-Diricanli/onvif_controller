@@ -78,9 +78,19 @@ function parseJson(text, operation) {
   return value;
 }
 
+/**
+ * Has the device rejected our session?
+ *
+ * This firmware does not use status codes for it. An expired session comes back
+ * as the bare text `unknown error happened` with a 200, indistinguishable from
+ * any other refusal — so treat that string as a possible expiry and let the one
+ * retry in `authenticated()` settle it. If a fresh login still gets the same
+ * answer, the retry is exhausted and the real error surfaces.
+ */
 function isRejected(response, text = '') {
   return response.status === 401 || response.status === 403 ||
-    /session[^a-z]*(expired|invalid|reject)|unauthori[sz]ed/i.test(text);
+    /session[^a-z]*(expired|invalid|reject)|unauthori[sz]ed/i.test(text) ||
+    /^\s*unknown error happened\s*$/i.test(text);
 }
 
 function normalizeImage(raw) {
