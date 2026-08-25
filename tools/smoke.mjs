@@ -217,6 +217,76 @@ async function main() {
     await exerciseImagingMode('clamp', MOCK_PORT + 3, 250, 200, true);
   }
 
+
+  console.log('\nVideo encoder configuration');
+  if (profile) {
+    const encUrl = `${BASE}/api/session/${id}/encoder`;
+    const encRead = await fetch(`${encUrl}?profile=${encodeURIComponent(profile)}`);
+    const enc = await encRead.json();
+    check('encoder read returns 200', encRead.status === 200, JSON.stringify(enc).slice(0, 200));
+    check('encoder reports current resolution',
+      Number.isFinite(enc.current?.width) && Number.isFinite(enc.current?.height),
+      JSON.stringify(enc.current));
+    check('encoder reports an encoding', typeof enc.current?.encoding === 'string', JSON.stringify(enc.current));
+
+    const resList = enc.options?.resolutions?.[enc.current?.encoding]
+      ?? Object.values(enc.options?.resolutions ?? {}).flat();
+    check('encoder options carry a device resolution list',
+      Array.isArray(resList) && resList.length > 0, JSON.stringify(enc.options?.resolutions).slice(0, 200));
+    check('encoder options carry an fps range',
+      Number.isFinite(enc.options?.fps?.min) && Number.isFinite(enc.options?.fps?.max),
+      JSON.stringify(enc.options?.fps));
+
+    // Per-profile option sets must differ. A UI that reuses one profile's list
+    // for another will offer resolutions the device rejects.
+    const profiles = session.profiles ?? [];
+    if (profiles.length > 1) {
+      const other = profiles.find((p) => p.token !== profile)?.token;
+      const otherEnc = await (await fetch(`${encUrl}?profile=${encodeURIComponent(other)}`)).json();
+      const otherList = Object.values(otherEnc.options?.resolutions ?? {}).flat();
+      const firstSet = new Set(resList.map((r) => `${r.width}x${r.height}`));
+      const secondSet = new Set(otherList.map((r) => `${r.width}x${r.height}`));
+      const disjoint = [...secondSet].every((r) => !firstSet.has(r));
+      check('each profile reports its OWN resolution set', disjoint,
+        `main=${[...firstSet].join(',')} sub=${[...secondSet].join(',')}`);
+    }
+
+    // A resolution the device never advertised must be refused locally.
+    const bogus = await fetch(encUrl, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile, settings: { width: 12345, height: 6789 } }),
+    });
+    const bogusBody = await bogus.json();
+    check('an unsupported resolution is rejected',
+      bogus.status === 400 && bogusBody.error?.code === 'BAD_REQUEST',
+      JSON.stringify(bogusBody).slice(0, 200));
+    check('the rejection names what is allowed',
+      /\d+x\d+/.test(`${bogusBody.error?.message} ${bogusBody.error?.hint}`),
+      JSON.stringify(bogusBody.error));
+
+    // A supported resolution applies and reads back.
+    const target = resList.find((r) => r.width !== enc.current.width) ?? resList[0];
+    const patch = await fetch(encUrl, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile, settings: { width: target.width, height: target.height } }),
+    });
+    const patched = await patch.json();
+    check('a supported resolution change returns 200', patch.status === 200, JSON.stringify(patched).slice(0, 200));
+    check('the resolution change is reported applied',
+      patched.applied?.width === true && patched.applied?.height === true, JSON.stringify(patched.applied));
+    check('the device reports the new resolution',
+      patched.current?.width === target.width && patched.current?.height === target.height,
+      `${patched.current?.width}x${patched.current?.height} wanted ${target.width}x${target.height}`);
+    check('streamRestartRequired is present', typeof patched.streamRestartRequired === 'boolean',
+      JSON.stringify(patched.streamRestartRequired));
+
+    // Restore, so later checks see the original geometry.
+    await fetch(encUrl, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile, settings: { width: enc.current.width, height: enc.current.height } }),
+    });
+  }
+
   console.log('\nDevice');
   const device = await fetch(`${BASE}/api/session/${id}/device`);
   const deviceBody = await device.json();
@@ -531,6 +601,61 @@ async function main() {
           check('a working ONVIF camera stays on the ONVIF path',
             okBody.source === 'onvif', `source=${okBody.source}`);
         }
+      }
+    }
+  }
+
+
+  console.log('\nEncoder change restarts the live stream');
+  {
+    // A resolution change invalidates the browser's SourceBuffer: ffmpeg keeps
+    // producing fragments and the socket stays open, but the init segment no
+    // longer describes the data, so the video freezes while every health signal
+    // still says fine. The server must force a rebuild rather than let that
+    // silent failure happen.
+    const { restartStreamsForProfile, hasLiveStreamForProfile } =
+      await import('../server/stream/pipeline.js');
+    check('pipeline exposes a profile restart hook',
+      typeof restartStreamsForProfile === 'function' && typeof hasLiveStreamForProfile === 'function');
+
+    if (profile) {
+      const startRes = await fetch(`${BASE}/api/session/${id}/stream/start`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile }),
+      });
+      const info = await startRes.json();
+      if (info.streamId) {
+        const sock = await openSocket(`${wsBase}/ws/stream?session=${id}&stream=${info.streamId}`, { waitMs: 2500 });
+        check('stream is live before the encoder change',
+          sock.frames.some((f) => f.binary), `${sock.frames.length} frames`);
+
+        // Change the encoder while that stream is running.
+        const encRead = await (await fetch(`${BASE}/api/session/${id}/encoder?profile=${encodeURIComponent(profile)}`)).json();
+        const list = Object.values(encRead.options?.resolutions ?? {}).flat();
+        const target = list.find((r) => r.width !== encRead.current?.width);
+        if (target) {
+          const patched = await (await fetch(`${BASE}/api/session/${id}/encoder`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ profile, settings: { width: target.width, height: target.height } }),
+          })).json();
+          check('a change to a streaming profile flags a restart',
+            patched.streamRestartRequired === true, JSON.stringify(patched.streamRestartRequired));
+
+          await delay(800);
+          const stillLive = hasLiveStreamForProfile(id, profile);
+          check('the stale pipeline is gone after the encoder change', stillLive === false,
+            'a surviving pipeline would feed fragments the browser silently rejects');
+
+          // Restore.
+          await fetch(`${BASE}/api/session/${id}/encoder`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ profile, settings: { width: encRead.current.width, height: encRead.current.height } }),
+          });
+        }
+        await fetch(`${BASE}/api/session/${id}/stream/stop`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ streamId: info.streamId }),
+        });
       }
     }
   }
