@@ -1328,3 +1328,21 @@ input, select {
     border: 0.0625rem solid currentColor;
   }
 }
+
+/* Compact "No password" toggle, tucked under the password field for the rare
+   admin-with-blank-password recorder. */
+.toggle-row-compact {
+  margin-top: var(--space-2);
+  font-size: var(--text-sm, 0.8125rem);
+  color: var(--text-secondary);
+}
+
+.toggle-row-compact .toggle-input {
+  width: 0.9375rem;
+  height: 0.9375rem;
+}
+
+.field-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

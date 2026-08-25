@@ -46,8 +46,12 @@ function validateUsername(username) {
   return null;
 }
 
-function validatePassword(password) {
-  if (!password) return 'Enter the ONVIF password.';
+function validatePassword(password, { allowEmpty = false } = {}) {
+  // Some recorders ship an admin account with a blank password (observed on
+  // UNIX RST08 / IPM32R32P NVRs). That is a real, if rare, configuration — so
+  // an empty password is allowed only when the operator has deliberately opted
+  // in via the "No password" toggle, never by leaving the field blank.
+  if (!password && !allowEmpty) return 'Enter the ONVIF password, or tick “No password”.';
   return null;
 }
 
@@ -238,6 +242,28 @@ export function renderConnect(root, { onConnected, prefillError = null }) {
   const userField = buildField('username', 'Username', 'text', 'onvif', remembered ? remembered.username : '');
   const passField = buildField('password', 'Password', 'password', '••••••••', '');
 
+  // --- No-password toggle (for admin-with-blank-password recorders) ---
+  let noPassword = false;
+  const noPassRow = el('label', 'toggle-row toggle-row-compact');
+  const noPassInput = el('input', 'toggle-input');
+  noPassInput.type = 'checkbox';
+  noPassRow.append(noPassInput, el('span', 'toggle-label', 'No password'));
+  const applyNoPassword = () => {
+    noPassword = noPassInput.checked;
+    const field = fields.password;
+    field.input.disabled = noPassword;
+    if (noPassword) {
+      field.input.value = '';
+      field.input.placeholder = 'No password';
+      field.error.hidden = true;
+    } else {
+      field.input.placeholder = '••••••••';
+    }
+  };
+  noPassInput.addEventListener('change', applyNoPassword);
+  cleanups.push(() => noPassInput.removeEventListener('change', applyNoPassword));
+  passField.appendChild(noPassRow);
+
   const hostPortRow = el('div', 'field-row');
   hostPortRow.append(hostField, portField);
   portField.style.flex = '0 0 6.5rem';
@@ -300,7 +326,11 @@ export function renderConnect(root, { onConnected, prefillError = null }) {
   function validateField(key, { force = false } = {}) {
     const field = fields[key];
     if (!force && !field.touched) return true;
-    const message = validators[key](field.input.value.trim());
+    // The password field, uniquely, is valid when empty IF the operator ticked
+    // "No password". Other fields take no options.
+    const message = key === 'password'
+      ? validators.password(field.input.value, { allowEmpty: noPassword })
+      : validators[key](field.input.value.trim());
     if (message) {
       field.error.textContent = message;
       field.error.hidden = false;
@@ -364,7 +394,9 @@ export function renderConnect(root, { onConnected, prefillError = null }) {
     const host = fields.host.input.value.trim();
     const port = Number(fields.port.input.value.trim());
     const username = fields.username.input.value.trim();
-    const password = fields.password.input.value;
+    // An explicit empty string when "No password" is ticked — never undefined,
+    // which the server rejects, and never the field's stale value.
+    const password = noPassword ? '' : fields.password.input.value;
 
     // Early ONVIF setup offers no incremental callback, so those stages remain
     // a narrative. The expensive final stage starts and advances only when the

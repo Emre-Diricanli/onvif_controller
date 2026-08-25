@@ -11,6 +11,52 @@ import { readRelayOutputs } from './device.js';
 const { Cam } = onvif;
 
 /**
+ * Some recorders ship an admin account with a BLANK password (observed on UNIX
+ * RST08 / IPM32R32P NVRs: `admin` with no password, valid over both RTSP and
+ * ONVIF). The `onvif` library refuses to authenticate these: its
+ * `_envelopeHeader` guards the WS-Security token behind `username && password`,
+ * so an empty password sends an UNauthenticated request and the device answers
+ * "Sender Not Authorized" — indistinguishable from a wrong password.
+ *
+ * The library's own `_passwordDigest()` handles an empty password correctly; it
+ * is only that `&& password` guard that drops the token. Patch the prototype
+ * once to emit the token whenever a USERNAME is present, so a deliberate
+ * empty-password login works while a truly anonymous one (no username) still
+ * sends no header. This mirrors how events.js guards a library bug on the
+ * instance rather than editing node_modules.
+ */
+function installEmptyPasswordAuth(CamClass) {
+  if (CamClass.__emptyPasswordAuthPatched) return;
+  const proto = CamClass.prototype;
+  const original = proto._envelopeHeader;
+  proto._envelopeHeader = function patchedEnvelopeHeader(openHeader) {
+    // Only take over the case the library gets wrong: a username with an empty
+    // password. Every other case falls through to the original untouched.
+    if (this.username && !this.password && this.password !== undefined) {
+      const req = this._passwordDigest();
+      let header = '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:a="http://www.w3.org/2005/08/addressing">'
+        + '<s:Header>'
+        + '<Security s:mustUnderstand="1" xmlns="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">'
+        + '<UsernameToken>'
+        + '<Username>' + this.username + '</Username>'
+        + '<Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest">' + req.passdigest + '</Password>'
+        + '<Nonce EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary">' + req.nonce + '</Nonce>'
+        + '<Created xmlns="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">' + req.timestamp + '</Created>'
+        + '</UsernameToken>'
+        + '</Security>';
+      if (!(openHeader !== undefined && openHeader)) {
+        header += '</s:Header><s:Body xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">';
+      }
+      return header;
+    }
+    return original.call(this, openHeader);
+  };
+  CamClass.__emptyPasswordAuthPatched = true;
+}
+
+installEmptyPasswordAuth(Cam);
+
+/**
  * Cloud instance metadata addresses. This app is operated from hosts inside AWS,
  * so an operator-supplied "camera host" is a live SSRF vector.
  *

@@ -496,11 +496,56 @@ async function uiAvailabilityChecks() {
   }
 }
 
+/**
+ * Empty-password authentication. Some recorders ship an admin account with a
+ * blank password (observed on UNIX RST08 / IPM32R32P NVRs). The `onvif` library
+ * drops the WS-Security token when the password is empty, so these devices read
+ * as "unauthorized" — a false negative. These checks pin the fix on both sides.
+ */
+async function emptyPasswordAuthChecks() {
+  console.log('\nEmpty-password auth');
+  const { readFile } = await import('node:fs/promises');
+
+  // Server side: the library prototype is patched to emit the token whenever a
+  // username is present, even with an empty password.
+  const onvif = (await import('onvif')).default;
+  const proto = onvif.Cam.prototype;
+  check('the empty-password auth patch is installed', onvif.Cam.__emptyPasswordAuthPatched === true);
+
+  const cam = Object.create(proto);
+  Object.assign(cam, {
+    username: 'admin', password: '', timeout: 1000, timeShift: 0,
+  });
+  const header = cam._envelopeHeader();
+  check('an empty password still sends a WS-Security token',
+    /<Security\b/.test(header) && /<Username>admin<\/Username>/.test(header) && /PasswordDigest/.test(header));
+
+  // A truly anonymous request (no username) still sends no auth header.
+  const anon = Object.create(proto);
+  Object.assign(anon, { username: '', password: '', timeout: 1000, timeShift: 0 });
+  check('an anonymous request sends no auth header', !/<Security\b/.test(anon._envelopeHeader()));
+
+  // A normal username+password request is untouched by the patch.
+  const normal = Object.create(proto);
+  Object.assign(normal, { username: 'admin', password: 's3cret', timeout: 1000, timeShift: 0 });
+  check('a normal password request still authenticates', /<Security\b/.test(normal._envelopeHeader()));
+
+  // Frontend: the password field is valid when empty ONLY with the opt-in.
+  const connectJs = await readFile(new URL('../public/js/views/connect.js', import.meta.url), 'utf8');
+  check('the connect form has a no-password opt-in', /No password/.test(connectJs));
+  check('an empty password is rejected without the opt-in',
+    /allowEmpty[\s\S]{0,120}return 'Enter the ONVIF password/.test(connectJs)
+    || /!password && !allowEmpty/.test(connectJs));
+  check('the opt-in submits an explicit empty string, not undefined',
+    /noPassword \? '' :/.test(connectJs));
+}
+
 async function main() {
   await profileDescriptionChecks();
   await playbackProbeChecks();
   await fanoutDeliveryChecks();
   await uiAvailabilityChecks();
+  await emptyPasswordAuthChecks();
   console.log('Starting mock camera and app server...');
   start('mock', ['tools/mock-camera.js', String(MOCK_PORT)]);
   start('app', ['server/index.js'], {
