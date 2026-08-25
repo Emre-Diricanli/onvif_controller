@@ -217,7 +217,7 @@ function readClock(systemDateAndTime) {
  * Full connect + capability probe. Every optional probe is best-effort: a device
  * that supports only Profile S with no PTZ and no Imaging must still connect.
  */
-export async function connectDevice({ host, port, username, password }) {
+export async function connectDevice({ host, port, username, password }, { onProgress = null } = {}) {
   const safeHost = await resolveSafeHost(host);
   const cam = await connectCam({ host: safeHost, port, username, password });
   const ctx = { host: safeHost, port };
@@ -231,7 +231,7 @@ export async function connectDevice({ host, port, username, password }) {
   const clock = readClock(dateTime);
 
   const { profiles, profileMap } = await describeProfiles(cam, {
-    host: safeHost, port, username, password, ctx,
+    host: safeHost, port, username, password, ctx, onProgress,
   });
 
   if (profiles.length === 0) {

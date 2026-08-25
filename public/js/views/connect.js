@@ -135,6 +135,61 @@ function el(tag, className, text) {
 }
 
 /**
+ * Opt-in connect progress wire format (`Accept: application/x-ndjson`): one
+ * JSON object per line. Profile events are
+ * `{type:"progress", phase:"profiles", completed, total}` and the terminal
+ * event is either `{type:"complete", session}` or `{type:"error", error}`.
+ */
+async function connectWithProgress(credentials, onProgress) {
+  let response;
+  try {
+    response = await fetch('/api/connect', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/x-ndjson',
+      },
+      body: JSON.stringify(credentials),
+    });
+  } catch {
+    throw new ApiError('DEVICE_UNREACHABLE', 'The controller server did not answer.',
+      'Check that the server process is running on this machine.', 0);
+  }
+
+  if (!response.ok || !response.body) {
+    const data = await response.json().catch(() => null);
+    const err = data?.error ?? {};
+    throw new ApiError(err.code || 'INTERNAL', err.message || `Request failed with status ${response.status}.`,
+      err.hint ?? null, response.status);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let session = null;
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    const lines = buffer.split('\n');
+    buffer = done ? '' : lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const event = JSON.parse(line);
+      if (event.type === 'progress') onProgress(event);
+      if (event.type === 'complete') session = event.session;
+      if (event.type === 'error') {
+        const err = event.error ?? {};
+        throw new ApiError(err.code || 'INTERNAL', err.message || 'The device could not be reached.',
+          err.hint ?? null, response.status);
+      }
+    }
+    if (done) break;
+  }
+  if (!session) throw new ApiError('INTERNAL', 'The connect response ended before it completed.');
+  return session;
+}
+
+/**
  * @param {HTMLElement} root
  * @param {{ onConnected: (session: object) => void, prefillError?: object|null }} opts
  * @returns {() => void} teardown
@@ -209,6 +264,7 @@ export function renderConnect(root, { onConnected, prefillError = null }) {
     progress.appendChild(li);
     return li;
   });
+  const stageLabels = stageEls.map((li) => li.querySelector('.stage-label'));
 
   // --- Error box ---
   const errorBox = el('div', 'error-box');
@@ -291,6 +347,7 @@ export function renderConnect(root, { onConnected, prefillError = null }) {
     stageTimers.forEach(clearTimeout);
     stageTimers = [];
     stageEls.forEach((li) => li.classList.remove('stage-active', 'stage-done'));
+    stageLabels.forEach((label, index) => { label.textContent = STAGES[index]; });
   }
 
   async function handleConnect() {
@@ -309,15 +366,27 @@ export function renderConnect(root, { onConnected, prefillError = null }) {
     const username = fields.username.input.value.trim();
     const password = fields.password.input.value;
 
-    // The handshake is a single request; the stages narrate its real phases.
-    // Each resolves as time passes, and all remaining resolve when it lands.
+    // Early ONVIF setup offers no incremental callback, so those stages remain
+    // a narrative. The expensive final stage starts and advances only when the
+    // server has actually enumerated the recorder's profiles.
     setStage(0, 'active');
     stageTimers.push(setTimeout(() => { setStage(0, 'done'); setStage(1, 'active'); }, 700));
     stageTimers.push(setTimeout(() => { setStage(1, 'done'); setStage(2, 'active'); }, 1600));
-    stageTimers.push(setTimeout(() => { setStage(2, 'done'); setStage(3, 'active'); }, 2800));
 
     try {
-      const session = await api.connect({ host, port, username, password });
+      const session = await connectWithProgress(
+        { host, port, username, password },
+        ({ completed, total }) => {
+          if (destroyed) return;
+          stageTimers.forEach(clearTimeout);
+          stageTimers = [];
+          setStage(0, 'done');
+          setStage(1, 'done');
+          setStage(2, 'done');
+          setStage(3, completed === total && total > 0 ? 'done' : 'active');
+          stageLabels[3].textContent = `Fetching profiles ${completed}/${total}`;
+        },
+      );
       if (destroyed) return;
       resetStages();
       stageEls.forEach((_, i) => setStage(i, 'done'));

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { AppError } from '../errors.js';
+import { AppError, toResponse } from '../errors.js';
 import { connectDevice, discoverDevices } from '../onvif/connect.js';
 import { createSession, requireSession, destroySession, serializeSession } from '../sessions.js';
 
@@ -20,7 +20,28 @@ router.post('/connect', wrap(async (req, res) => {
     throw new AppError('BAD_REQUEST', 'Port must be a whole number between 1 and 65535.');
   }
 
-  const result = await connectDevice({ host, port: parsedPort, username, password });
+  const wantsProgress = /(?:^|,)\s*application\/x-ndjson(?:\s*;|\s*,|\s*$)/i
+    .test(req.get('accept') ?? '');
+  if (wantsProgress) {
+    res.status(200).type('application/x-ndjson');
+    res.flushHeaders();
+  }
+  const sendProgress = wantsProgress
+    ? (progress) => res.write(`${JSON.stringify({ type: 'progress', ...progress })}\n`)
+    : null;
+
+  let result;
+  try {
+    result = await connectDevice(
+      { host, port: parsedPort, username, password },
+      { onProgress: sendProgress },
+    );
+  } catch (err) {
+    if (!wantsProgress) throw err;
+    const { body } = toResponse(err);
+    res.end(`${JSON.stringify({ type: 'error', ...body })}\n`);
+    return;
+  }
   const session = createSession({
     host: result.cam.hostname ?? host,
     port: parsedPort,
@@ -31,7 +52,9 @@ router.post('/connect', wrap(async (req, res) => {
 
   // Skew is reported rather than fatal: the connect already succeeded, so digest
   // still works, but it is about to stop working and the operator should know.
-  res.json(serializeSession(session, { includeId: true }));
+  const payload = serializeSession(session, { includeId: true });
+  if (wantsProgress) res.end(`${JSON.stringify({ type: 'complete', session: payload })}\n`);
+  else res.json(payload);
 }));
 
 router.get('/session/:id', wrap(async (req, res) => {
