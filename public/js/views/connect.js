@@ -66,7 +66,7 @@ function describeError(err, { host, port }) {
     case 'DEVICE_UNREACHABLE':
       return {
         title: `Nothing is listening on ${host}:${port}.`,
-        detail: 'On Hikvision, ONVIF is disabled by default — enable it under Network → Advanced → Integration Protocol.',
+        detail: 'ONVIF is switched off by default on many devices — look for an ONVIF or "integration protocol" setting and enable it. Also confirm the port: it is often not the web-UI port.',
         hint: err.hint,
       };
     case 'DEVICE_TIMEOUT':
@@ -78,7 +78,7 @@ function describeError(err, { host, port }) {
     case 'UNAUTHORIZED':
       return {
         title: 'Device rejected those credentials.',
-        detail: 'Hikvision requires a separate ONVIF user; the web-UI admin account will not work here.',
+        detail: 'ONVIF accounts are usually separate from the web-UI login, so the browser admin account often will not work. Check for a dedicated ONVIF user, and that the device clock is correct.',
         hint: err.hint,
       };
     case 'CLOCK_SKEW': {

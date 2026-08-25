@@ -236,7 +236,7 @@ export async function connectDevice({ host, port, username, password }) {
 
   if (profiles.length === 0) {
     throw new AppError('DEVICE_ERROR', 'The device authenticated but reported no media profiles.',
-      'On a Hikvision NVR, confirm at least one channel is online and that the ONVIF user has permission to view it.');
+      'On a recorder, confirm at least one channel is online and that this ONVIF user has permission to view it.');
   }
 
   // Refresh explicitly because recorder firmware often does not populate the

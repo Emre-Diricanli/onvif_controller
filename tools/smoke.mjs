@@ -776,7 +776,14 @@ async function main() {
   });
   const unauthBody = await unauth.json();
   check('rejected credentials return UNAUTHORIZED', unauthBody.error?.code === 'UNAUTHORIZED', JSON.stringify(unauthBody).slice(0, 200));
-  check('unauthorized carries a Hikvision-specific hint', /ONVIF user/i.test(unauthBody.error?.hint ?? ''), unauthBody.error?.hint ?? 'no hint');
+  // Deliberately NOT vendor-specific. Most devices refuse GetDeviceInformation
+  // until authenticated, so at failure time we have no evidence of the make —
+  // an earlier version asserted Hikvision on every auth failure and told an
+  // operator the wrong thing about an OEM recorder.
+  const authHint = unauthBody.error?.hint ?? '';
+  check('unauthorized explains the cause without naming a vendor',
+    /ONVIF account|ONVIF user|integration protocol/i.test(authHint) && !/hikvision|dahua|axis/i.test(authHint),
+    authHint || 'no hint');
   rejectMock.kill('SIGKILL');
 
   console.log('\nUnreachable host path');

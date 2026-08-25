@@ -50,7 +50,11 @@ export function toResponse(err) {
  * Translate a raw error from the `onvif` library, a socket, or a SOAP fault into
  * an AppError carrying an operator-facing remediation hint.
  *
- * The hints are deliberately Hikvision-aware: that fleet is the primary target
+ * The hints describe CAUSES, not vendors. Most devices refuse
+ * GetDeviceInformation until authenticated, so when a connection fails we
+ * usually have no evidence of the make — naming one would be a guess dressed
+ * up as a diagnosis. An earlier version asserted Hikvision on every auth
+ * failure and told an operator the wrong thing about an OEM recorder.
  * and its two classic failure modes (ONVIF disabled, separate ONVIF user) look
  * identical to a generic "connection failed" without them.
  */
@@ -66,7 +70,7 @@ export function mapOnvifError(err, ctx = {}) {
     return new AppError(
       'DEVICE_UNREACHABLE',
       `Nothing is listening on ${host}:${port}.`,
-      'On Hikvision devices ONVIF is disabled by default. Enable it under Network → Advanced Settings → Integration Protocol, then retry.',
+      'ONVIF is often disabled by default, and it frequently listens on a different port from the web UI. Enable ONVIF in the device settings and confirm the port before retrying.',
     );
   }
   if (code === 'EHOSTUNREACH' || code === 'ENETUNREACH') {
@@ -94,7 +98,7 @@ export function mapOnvifError(err, ctx = {}) {
     return new AppError(
       'DEVICE_UNREACHABLE',
       `${host} closed the connection unexpectedly.`,
-      'Some Hikvision firmware resets ONVIF connections when the ONVIF user is disabled. Verify the ONVIF account is enabled on the device.',
+      'Some firmware resets the connection when the ONVIF service or its user account is disabled. Verify both are enabled on the device.',
     );
   }
 
@@ -104,10 +108,18 @@ export function mapOnvifError(err, ctx = {}) {
     /not authorized|unauthorized|authoriz|sender not authorized|401/i.test(raw) ||
     err?.statusCode === 401
   ) {
+    // Deliberately vendor-neutral. Most devices refuse GetDeviceInformation
+    // until authenticated, so at this point we have NO evidence of the make —
+    // naming one would be a guess presented as a diagnosis. The underlying
+    // cause (ONVIF wants its own account, separate from the web-UI login) is
+    // common across Hikvision, Dahua and the budget OEM firmwares alike, so
+    // describe the cause rather than asserting a brand.
     return new AppError(
       'UNAUTHORIZED',
       'The device rejected those credentials.',
-      'Hikvision requires a dedicated ONVIF user created under Network → Advanced Settings → Integration Protocol. The web-UI admin account will not authenticate over ONVIF.',
+      'Many recorders and cameras keep ONVIF accounts separate from the web-UI login, so the admin account you use in the browser often will not work here. '
+      + 'Look for an ONVIF or "integration protocol" user in the device settings, and check the account is enabled. '
+      + 'A device clock that is more than a few seconds out will also fail this way, because ONVIF signs a timestamp.',
     );
   }
   if (/ter:invalidargval|invalid.*argument|no such/i.test(raw)) {
