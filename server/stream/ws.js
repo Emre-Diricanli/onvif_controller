@@ -37,6 +37,9 @@ export function handleStreamSocket(ws, url, ctx) {
   const onStats = (stats) => sendJson(ws, { type: 'stats', ...stats, droppedFrames });
   const onDegraded = (detail) => sendJson(ws, { type: 'degraded', ...detail });
   const onError = (detail) => sendJson(ws, { type: 'error', ...detail });
+  // The encoder changed under us: the client must drop its SourceBuffer and
+  // re-prime from a fresh init segment, which a plain reconnect does.
+  const onReconfigured = (detail) => sendJson(ws, { type: 'reconfigured', ...detail });
   const onStopped = () => {
     if (ws.readyState === 0 || ws.readyState === 1) {
       ws.close(handle.sessionEnded ? 4001 : 4002, handle.sessionEnded ? 'Session expired' : 'Stream stopped');
@@ -48,6 +51,7 @@ export function handleStreamSocket(ws, url, ctx) {
     handle.off('stats', onStats);
     handle.off('degraded', onDegraded);
     handle.off('error', onError);
+    handle.off('reconfigured', onReconfigured);
     handle.off('close', onStopped);
   };
   handle.on('init', onInit);
@@ -55,6 +59,7 @@ export function handleStreamSocket(ws, url, ctx) {
   handle.on('stats', onStats);
   handle.on('degraded', onDegraded);
   handle.on('error', onError);
+  handle.on('reconfigured', onReconfigured);
   handle.on('close', onStopped);
   ws.once('close', release);
   ws.once('error', release);

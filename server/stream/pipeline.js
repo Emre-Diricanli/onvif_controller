@@ -312,6 +312,46 @@ export function getStream(streamId) {
   return streams.get(streamId);
 }
 
+/**
+ * Rebuild every live stream for a profile after its encoder configuration changed.
+ *
+ * A resolution or codec change invalidates the running pipeline in a way that is
+ * invisible from the socket: ffmpeg keeps producing fragments, the WebSocket
+ * stays open, and the browser's SourceBuffer silently rejects everything because
+ * the init segment it was primed with no longer describes the incoming data. The
+ * video freezes on the last good frame while every health signal says fine.
+ *
+ * So the pipeline must be torn down and rebuilt, and the client must be told to
+ * re-prime MSE from a fresh init segment. Each affected stream is closed with
+ * code 4003, which the player treats as "reconnect and start over" rather than
+ * as a fatal error.
+ */
+export function restartStreamsForProfile(sessionId, profileToken) {
+  const affected = [];
+  for (const [streamId, handle] of streams) {
+    if (handle.sessionId === sessionId && handle.profile?.token === profileToken) {
+      affected.push(streamId);
+    }
+  }
+  for (const streamId of affected) {
+    const handle = streams.get(streamId);
+    if (!handle) continue;
+    // Tell viewers to reconnect BEFORE tearing down, so the close reason is
+    // distinguishable from an ordinary failure.
+    handle.emit('reconfigured', { reason: 'encoder-changed', profile: profileToken });
+    stopStream(streamId);
+  }
+  return affected.length;
+}
+
+/** Is any stream currently running for this profile? */
+export function hasLiveStreamForProfile(sessionId, profileToken) {
+  for (const handle of streams.values()) {
+    if (handle.sessionId === sessionId && handle.profile?.token === profileToken) return true;
+  }
+  return false;
+}
+
 export function stopAllForSession(sessionId) {
   for (const [streamId, handle] of streams) {
     if (handle.sessionId === sessionId) {

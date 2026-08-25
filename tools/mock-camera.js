@@ -113,6 +113,73 @@ function systemDateAndTime(offsetSeconds = 0) {
 
 /** Per-operation call counts, so tests can assert what the camera actually received. */
 const callCounts = Object.create(null);
+/**
+ * Mutable video-encoder state.
+ *
+ * Modelled on the operator's real camera: two profiles whose resolution sets are
+ * DISJOINT. A UI that reuses one profile's option list for the other will offer
+ * 352x288 on the main stream, which the device rejects — so the mock has to be
+ * able to catch that.
+ */
+const ENCODER_MODE = process.env.MOCK_ENCODER_MODE ?? 'default';
+
+const ENCODER_RESOLUTIONS = {
+  VideoEncoder: [
+    { width: 2880, height: 1616 }, { width: 2560, height: 1440 },
+    { width: 2304, height: 1296 }, { width: 1920, height: 1080 },
+    { width: 1280, height: 720 },
+  ],
+  VideoSubEncoder: [
+    { width: 704, height: 576 }, { width: 800, height: 448 },
+    { width: 640, height: 480 }, { width: 640, height: 360 },
+    { width: 352, height: 288 },
+  ],
+};
+
+const encoderState = {
+  VideoEncoder:    { name: 'MainStream', encoding: 'H265', width: 2880, height: 1616, fps: 30, bitrate: 4096, govLength: 50 },
+  VideoSubEncoder: { name: 'SubStream',  encoding: 'H265', width: 640,  height: 480,  fps: 30, bitrate: 512,  govLength: 50 },
+};
+const ORIGINAL_ENCODER = JSON.parse(JSON.stringify(encoderState));
+
+/** Which encoder configuration belongs to a given media profile. */
+function encoderTokenForProfile(profileToken) {
+  return /sub/i.test(profileToken ?? '') ? 'VideoSubEncoder' : 'VideoEncoder';
+}
+
+function encoderConfigXml(token) {
+  const c = encoderState[token];
+  return `<trt:Configurations token="${token}">`
+    + `<tt:Name>${c.name}</tt:Name><tt:UseCount>1</tt:UseCount>`
+    + `<tt:Encoding>${c.encoding}</tt:Encoding>`
+    + `<tt:Resolution><tt:Width>${c.width}</tt:Width><tt:Height>${c.height}</tt:Height></tt:Resolution>`
+    + `<tt:Quality>4</tt:Quality>`
+    + `<tt:RateControl><tt:FrameRateLimit>${c.fps}</tt:FrameRateLimit>`
+    + `<tt:EncodingInterval>1</tt:EncodingInterval><tt:BitrateLimit>${c.bitrate}</tt:BitrateLimit></tt:RateControl>`
+    + `<tt:H264><tt:GovLength>${c.govLength}</tt:GovLength><tt:H264Profile>Main</tt:H264Profile></tt:H264>`
+    + `</trt:Configurations>`;
+}
+
+function soapEnvelope(inner) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+<SOAP-ENV:Body>${inner}</SOAP-ENV:Body></SOAP-ENV:Envelope>`;
+}
+
+function encoderOptionsXml(token) {
+  const list = ENCODER_RESOLUTIONS[token] ?? ENCODER_RESOLUTIONS.VideoEncoder;
+  const res = list.map((r) => `<tt:ResolutionsAvailable><tt:Width>${r.width}</tt:Width><tt:Height>${r.height}</tt:Height></tt:ResolutionsAvailable>`).join('');
+  const block = (name) => `<tt:${name}>${res}`
+    + `<tt:GovLengthRange><tt:Min>1</tt:Min><tt:Max>100</tt:Max></tt:GovLengthRange>`
+    + `<tt:FrameRateRange><tt:Min>1</tt:Min><tt:Max>30</tt:Max></tt:FrameRateRange>`
+    + `<tt:EncodingIntervalRange><tt:Min>1</tt:Min><tt:Max>1</tt:Max></tt:EncodingIntervalRange>`
+    + `</tt:${name}>`;
+  return soapEnvelope('<trt:GetVideoEncoderConfigurationOptionsResponse><trt:Options>'
+    + `<tt:QualityRange><tt:Min>1</tt:Min><tt:Max>6</tt:Max></tt:QualityRange>`
+    + block('H264') + block('H265')
+    + '</trt:Options></trt:GetVideoEncoderConfigurationOptionsResponse>');
+}
+
 const imagingState = { Brightness: 255, ColorSaturation: 128, Contrast: 128, Sharpness: 128 };
 const ORIGINAL_IMAGING = { ...imagingState };
 const REPORTED_IMAGING_FIELDS = ['Brightness', 'ColorSaturation', 'Contrast', 'Focus', 'Sharpness'];
@@ -198,6 +265,59 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+if (op === 'GetVideoEncoderConfigurationOptions') {
+      const profileToken = (body.match(/<[^>]*ProfileToken[^>]*>([^<]*)</) ?? [])[1];
+      res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+      res.end(encoderOptionsXml(encoderTokenForProfile(profileToken)));
+      return;
+    }
+
+    if (op === 'GetVideoEncoderConfigurations') {
+      res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+      res.end(soapEnvelope('<trt:GetVideoEncoderConfigurationsResponse>'
+        + Object.keys(encoderState).map(encoderConfigXml).join('')
+        + '</trt:GetVideoEncoderConfigurationsResponse>'));
+      return;
+    }
+
+    if (op === 'GetVideoEncoderConfiguration') {
+      const token = (body.match(/<[^>]*ConfigurationToken[^>]*>([^<]*)</) ?? [])[1] ?? 'VideoEncoder';
+      res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+      res.end(soapEnvelope('<trt:GetVideoEncoderConfigurationResponse>'
+        + encoderConfigXml(encoderState[token] ? token : 'VideoEncoder').replace(/trt:Configurations/g, 'trt:Configuration')
+        + '</trt:GetVideoEncoderConfigurationResponse>'));
+      return;
+    }
+
+    if (op === 'SetVideoEncoderConfiguration') {
+      const token = (body.match(/token="([^"]+)"/) ?? [])[1] ?? 'VideoEncoder';
+      const cfg = encoderState[token];
+      if (cfg && ENCODER_MODE !== 'ignore') {
+        const grab = (tag) => {
+          const m = body.match(new RegExp(`<(?:[A-Za-z0-9_.-]+:)?${tag}[^>]*>([^<]*)<`));
+          return m ? Number(m[1]) : null;
+        };
+        const w = grab('Width'), h = grab('Height');
+        const allowed = ENCODER_RESOLUTIONS[token] ?? [];
+        // A real device rejects a resolution it never advertised.
+        if (w !== null && h !== null && !allowed.some((r) => r.width === w && r.height === h)) {
+          res.writeHead(400, { 'Content-Type': 'application/soap+xml' });
+          res.end(fault(`Resolution ${w}x${h} is not supported on ${token}`, 'ter:InvalidArgVal'));
+          return;
+        }
+        if (w !== null) cfg.width = w;
+        if (h !== null) cfg.height = h;
+        const fps = grab('FrameRateLimit'); if (fps !== null) cfg.fps = fps;
+        const br = grab('BitrateLimit'); if (br !== null) cfg.bitrate = br;
+        const gov = grab('GovLength'); if (gov !== null) cfg.govLength = gov;
+        const enc = (body.match(/<(?:[A-Za-z0-9_.-]+:)?Encoding[^>]*>([^<]*)</) ?? [])[1];
+        if (enc) cfg.encoding = enc;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+      res.end(soapEnvelope('<trt:SetVideoEncoderConfigurationResponse/>'));
+      return;
+    }
+
     if (service === 'imaging' && op === 'GetImagingSettings') {
       res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
       res.end(imagingSettingsResponse());
@@ -272,5 +392,6 @@ server.listen(PORT, HOST, () => {
   console.log(`  ${available.size} fixtures loaded. Connect with any username/password.`);
   console.log('  MOCK_REJECT_AUTH=1 to test the 401 path, MOCK_SKEW_SECONDS=600 to test clock skew.');
   console.log(`  Imaging mode: ${IMAGING_MODE} (MOCK_IMAGING_MODE=ignore|clamp).`);
+  console.log(`  Encoder mode: ${ENCODER_MODE} (MOCK_ENCODER_MODE=ignore).`);
   console.log(`  Network mode: ${NETWORK_MODE} (MOCK_NETWORK_MODE=ignore).`);
 });
