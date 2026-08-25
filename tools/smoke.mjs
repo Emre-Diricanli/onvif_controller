@@ -169,6 +169,7 @@ async function profileDescriptionChecks() {
 async function playbackProbeChecks() {
   console.log('\nPlayback probe (Profile G)');
   const { probePlayback } = await import('../server/onvif/playback.js');
+  const { readFile } = await import('node:fs/promises');
 
   const envelope = { _envelopeHeader: () => '<E>', _envelopeFooter: () => '</E>' };
   const svc = (ns, path) => ({ namespace: `http://www.onvif.org/${ns}/wsdl`, XAddr: `http://192.168.99.9/onvif/${path}` });
@@ -236,6 +237,15 @@ async function playbackProbeChecks() {
   // A step that never ran must not read as a passing step.
   const failedStep = report.steps.find((s) => s.step === 'findRecordings');
   check('a failed search step is reported as failed, not ok', failedStep.status === 'failed', JSON.stringify(failedStep));
+
+  // Regression: the standalone probe CLI must attach host/port to the session
+  // before probing. connectDevice does not, so without it every service XAddr
+  // was pinned to the literal string "undefined" and every call hung up —
+  // exposed by the first real Profile G recorder (AR504-32). Assert the CLI
+  // still does this rather than silently regressing.
+  const cli = await readFile(new URL('../tools/probe-playback.mjs', import.meta.url), 'utf8');
+  check('the probe CLI attaches host to the session before probing',
+    /session\.host\s*=\s*options\.host/.test(cli), 'session.host assignment missing — XAddrs would pin to undefined');
 }
 
 /**
