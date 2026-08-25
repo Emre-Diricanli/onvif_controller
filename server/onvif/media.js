@@ -151,8 +151,13 @@ export function describeSources(rawSources, profiles, profileMap, { imaging = fa
       && profileNameCounts.get(distinctProfileNames[0]) === 1 ? distinctProfileNames[0] : null;
     // A "name" that merely repeats the token is not a name. Cameras commonly
     // echo the token here, which would surface as "videoSourceToken" in the UI.
+    // Reject names that are plainly internal ONVIF plumbing rather than
+    // something an operator chose. A recorder that never had its channels named
+    // reports "VideoSourceConfig 3", which is worse in the UI than "Channel 3"
+    // because it looks like information while carrying none.
+    const GENERIC = /^(video)?source(config(uration)?)?[\s_-]*\d*$|^videoencoder|^profile[\s_-]*\d*$|^channel[\s_-]*\d*$/i;
     const named = [uniqueSourceName, uniqueConfigName, uniqueProfileName]
-      .find((n) => n && n !== source.token);
+      .find((n) => n && n !== source.token && !GENERIC.test(n.trim()));
     source.label = named ?? `Channel ${index + 1}`;
   }
 
