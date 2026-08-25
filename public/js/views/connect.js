@@ -66,7 +66,9 @@ function describeError(err, { host, port }) {
     case 'DEVICE_UNREACHABLE':
       return {
         title: `Nothing is listening on ${host}:${port}.`,
-        detail: 'ONVIF is switched off by default on many devices — look for an ONVIF or "integration protocol" setting and enable it. Also confirm the port: it is often not the web-UI port.',
+        // No hardcoded detail: the server's hint already explains this, and
+        // duplicating it here printed the same advice twice in the error box.
+        detail: null,
         hint: err.hint,
       };
     case 'DEVICE_TIMEOUT':
@@ -78,7 +80,7 @@ function describeError(err, { host, port }) {
     case 'UNAUTHORIZED':
       return {
         title: 'Device rejected those credentials.',
-        detail: 'ONVIF accounts are usually separate from the web-UI login, so the browser admin account often will not work. Check for a dedicated ONVIF user, and that the device clock is correct.',
+        detail: null,
         hint: err.hint,
       };
     case 'CLOCK_SKEW': {
@@ -217,16 +219,16 @@ export function renderConnect(root, { onConnected, prefillError = null }) {
     const { title, detail, hint } = describeError(err, ctx);
     errorBox.replaceChildren();
     errorBox.appendChild(el('p', 'error-title', title));
-    if (detail) errorBox.appendChild(el('p', 'error-detail', detail));
-    if (hint && hint !== detail) errorBox.appendChild(el('p', 'error-hint', hint));
+    const body = hint || detail;
+    if (body) errorBox.appendChild(el('p', 'error-detail', body));
     errorBox.hidden = false;
   }
 
   if (prefillError) {
     const { title, detail, hint } = describeError(prefillError, { host: '', port: '' });
     errorBox.appendChild(el('p', 'error-title', title));
-    if (detail) errorBox.appendChild(el('p', 'error-detail', detail));
-    if (hint && hint !== detail) errorBox.appendChild(el('p', 'error-hint', hint));
+    const body = hint || detail;
+    if (body) errorBox.appendChild(el('p', 'error-detail', body));
     errorBox.hidden = false;
   }
 
