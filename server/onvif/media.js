@@ -149,7 +149,11 @@ export function describeSources(rawSources, profiles, profileMap, { imaging = fa
     const distinctProfileNames = [...new Set(group.profileNames)];
     const uniqueProfileName = distinctProfileNames.length === 1
       && profileNameCounts.get(distinctProfileNames[0]) === 1 ? distinctProfileNames[0] : null;
-    source.label = uniqueSourceName ?? uniqueConfigName ?? uniqueProfileName ?? `Channel ${index + 1}`;
+    // A "name" that merely repeats the token is not a name. Cameras commonly
+    // echo the token here, which would surface as "videoSourceToken" in the UI.
+    const named = [uniqueSourceName, uniqueConfigName, uniqueProfileName]
+      .find((n) => n && n !== source.token);
+    source.label = named ?? `Channel ${index + 1}`;
   }
 
   if (ungrouped.length) {
