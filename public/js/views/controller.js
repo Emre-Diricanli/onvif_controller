@@ -1,9 +1,11 @@
 // views/controller.js — the main shell.
 //
 // The video is the hero surface; controls live in a persistent translucent
-// sidebar (a draggable bottom sheet on narrow screens). Sections render ONLY
-// for services the capability matrix reports as supported — an unsupported
-// section is absent, never disabled. Multiple sections may remain open.
+// sidebar (a draggable bottom sheet on narrow screens). EVERY section the app
+// knows how to render is listed, so the operator can see the whole surface of
+// the tool; a section the device cannot support renders a stated reason in
+// place of its controls, never a disabled clone of them (UI-AVAILABILITY.md).
+// Multiple sections may remain open.
 // Nothing here is optimistic: every state shown comes from the player, the
 // WebSocket, or a completed API call.
 //
@@ -27,6 +29,8 @@ import { renderEvents } from './events.js';
 import { renderStreamUrls } from './streamurls.js';
 import { renderNetwork } from './network.js';
 import { renderEncoder } from './encoder.js';
+import { renderPlayback } from './playback.js';
+import { renderFanout } from './fanout.js';
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -252,6 +256,36 @@ function writeSidebarState(state) {
   } catch { /* storage may be disabled; state still lasts for this mount */ }
 }
 
+/**
+ * Why a panel cannot be used on this device, in the device's own terms.
+ *
+ * Every string here describes something we OBSERVED — a service the device did
+ * not advertise, a node it did not report. Never assert a cause we did not see:
+ * we already shipped and fixed one bug that blamed "Hikvision firmware" on a
+ * device that had refused to identify itself, and the operator caught it.
+ *
+ * `def.reason` may be a string or a function of the current source, so a
+ * channel-scoped section can name the channel it is talking about.
+ */
+function reasonFor(def, state) {
+  const source = state?.currentSource ?? null;
+  const raw = typeof def.reason === 'function' ? def.reason(source) : def.reason;
+  return raw || 'This device does not report support for this feature.';
+}
+
+/**
+ * The body of an unavailable section: prose, never controls.
+ *
+ * Deliberately renders no inputs at all. A greyed-out slider reads as "the app
+ * is broken"; a sentence reads as "the camera cannot do this", which is the
+ * truth and is actionable.
+ */
+function renderUnavailable(container, reason) {
+  const note = el('p', 'sidebar-unavailable-note', reason);
+  container.appendChild(note);
+  return { destroy() { note.remove(); } };
+}
+
 class SidebarSections {
   constructor(host, definitions, state, cleanups) {
     this.host = host;
@@ -264,8 +298,14 @@ class SidebarSections {
 
   build() {
     for (const def of this.definitions) {
-      if (!def.available()) continue;
+      // Every panel the app knows how to render is listed, so the operator can
+      // see the tool's whole surface and never has to wonder whether a feature
+      // is missing because the device lacks it or because it was never built.
+      // An unsupported panel renders its reason instead of its controls — never
+      // a disabled clone of the real thing (SPEC.md §4, UI-AVAILABILITY.md).
+      const unavailable = def.available() ? null : reasonFor(def, this.state);
       const section = el('section', 'sidebar-section');
+      if (unavailable) section.classList.add('sidebar-section-unavailable');
       const heading = el('h2', 'sidebar-section-heading');
       const button = el('button', 'sidebar-section-toggle');
       button.type = 'button';
@@ -273,20 +313,30 @@ class SidebarSections {
       // def.heading overrides the visible label (multi-channel sections echo
       // the channel they act on); def.name stays the stable persistence key.
       const label = el('span', 'sidebar-section-label', def.heading || def.name);
+      button.appendChild(label);
+      if (unavailable) {
+        // A tag rather than a colour alone: colour is not available to every
+        // reader, and "Unavailable" is unambiguous.
+        button.appendChild(el('span', 'sidebar-section-tag', 'Unavailable'));
+      }
       const chevron = el('span', 'sidebar-section-chevron', '⌄');
       chevron.setAttribute('aria-hidden', 'true');
-      button.append(label, chevron);
+      button.appendChild(chevron);
       heading.appendChild(button);
       const content = el('div', 'sidebar-section-content');
       content.id = id;
       button.setAttribute('aria-controls', id);
-      const open = this.state.expanded.has(def.name);
+      // An unavailable section always starts collapsed, whatever was persisted:
+      // restoring it open would push the working panels down the column.
+      const open = !unavailable && this.state.expanded.has(def.name);
       button.setAttribute('aria-expanded', String(open));
       content.hidden = !open;
       section.classList.toggle('sidebar-section-open', open);
       section.append(heading, content);
       this.host.appendChild(section);
-      const view = def.build(content);
+      // build() is never called for an unavailable section, so it cannot issue
+      // a request or mount a control that would fail against this device.
+      const view = unavailable ? renderUnavailable(content, unavailable) : def.build(content);
       const entry = { def, section, button, content, view, spring: null, value: open ? 1 : 0 };
       this.entries.set(def.name, entry);
       this.cleanups.push(pressable(button, { scale: 0.985 }));
@@ -616,6 +666,10 @@ export function renderController(root, { session, onDisconnect }) {
       scope: 'source',
       available: () => Boolean(session.capabilities && session.capabilities.ptz && session.ptz),
       availableOn: (source) => source.ptzSupported !== false,
+      reason: () => (session.capabilities && session.capabilities.ptz
+        ? 'This device advertises PTZ but reports no movable node, so there is nothing to drive.'
+        : 'This device does not advertise the ONVIF PTZ service. It is most likely a fixed camera.'),
+      reasonOnChannel: (label) => `${label} reports no PTZ node. Other channels on this recorder may still be movable.`,
       build: (c) => renderJoystick(c, { ...ctx() }),
     },
     {
@@ -623,6 +677,10 @@ export function renderController(root, { session, onDisconnect }) {
       scope: 'source',
       available: () => Boolean(session.capabilities && session.capabilities.ptz && session.ptz && session.ptz.presetsSupported),
       availableOn: (source) => source.ptzSupported !== false,
+      reason: () => (session.capabilities && session.capabilities.ptz && session.ptz
+        ? 'This device has PTZ but does not report preset support.'
+        : 'Presets need PTZ, and this device does not advertise the ONVIF PTZ service.'),
+      reasonOnChannel: (label) => `${label} reports no PTZ, so it has no presets.`,
       build: (c) => renderPresets(c, { ...ctx() }),
     },
     {
@@ -630,12 +688,15 @@ export function renderController(root, { session, onDisconnect }) {
       scope: 'source',
       available: () => Boolean(session.capabilities && session.capabilities.imaging),
       availableOn: (source) => source.imagingSupported !== false,
+      reason: 'This device does not advertise the ONVIF Imaging service, so brightness, contrast and exposure cannot be adjusted from here.',
+      reasonOnChannel: (label) => `${label} reports no imaging source. Other channels on this recorder may still be adjustable.`,
       build: (c) => renderImaging(c, { ...ctx() }),
     },
     {
       name: 'Events',
       scope: 'device',
       available: () => Boolean(session.capabilities && session.capabilities.events),
+      reason: 'This device does not advertise the ONVIF Events service, so it cannot report motion or tamper detections.',
       build: (c) => renderEvents(c, { sessionId: session.sessionId, onError: showError }),
     },
     {
@@ -670,6 +731,24 @@ export function renderController(root, { session, onDisconnect }) {
       build: (c) => renderStreamUrls(c, { sessionId: session.sessionId, profile: currentProfile, onError: showError }),
     },
     {
+      name: 'Playback',
+      scope: 'device',
+      // Profile G. The capability matrix carries `recording` from GetServices;
+      // replay without recording still means there is something to look at.
+      available: () => Boolean(session.capabilities
+        && (session.capabilities.recording || session.capabilities.replay)),
+      reason: 'This device advertises no ONVIF Recording, Replay or Search service, so recorded footage cannot be reached over ONVIF. Its own client software may still be able to play it back.',
+      build: (c) => renderPlayback(c, { sessionId: session.sessionId, onError: showError }),
+    },
+    {
+      name: 'Fan-out',
+      scope: 'device',
+      // Fan-out is a property of the server, not the camera: it is available
+      // whenever the operator configured targets, on any device.
+      available: () => true,
+      build: (c) => renderFanout(c, { onError: showError }),
+    },
+    {
       name: 'Device',
       scope: 'device',
       available: () => true,
@@ -702,6 +781,19 @@ export function renderController(root, { session, onDisconnect }) {
       ...def,
       heading: scope === 'source' ? `${def.name} — ${channelLabel(currentSource)}` : def.name,
       available: () => def.available() && (def.availableOn ? def.availableOn(currentSource) : true),
+      // Distinguish "this device cannot" from "this channel cannot". On a
+      // recorder a sibling channel may well support what this one does not, and
+      // telling the operator that is the difference between a dead end and a
+      // next step.
+      reason: () => {
+        if (!def.available()) {
+          return typeof def.reason === 'function' ? def.reason(currentSource) : def.reason;
+        }
+        const label = channelLabel(currentSource);
+        return def.reasonOnChannel
+          ? def.reasonOnChannel(label)
+          : `${label} does not report support for this. Other channels on this device may still support it.`;
+      },
     }));
 
   // --- Persistent controls: right sidebar on wide screens, draggable sheet on mobile ---

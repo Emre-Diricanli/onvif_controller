@@ -1284,3 +1284,47 @@ input, select {
   line-height: 1.5;
   color: var(--text-secondary);
 }
+
+/* --- Unavailable sections ------------------------------------------------
+   A panel the device cannot support stays listed and expandable, but its body
+   is a stated reason rather than a disabled copy of the real control. A
+   greyed-out slider reads as "the app is broken"; a sentence reads as "the
+   camera cannot do this", which is both true and actionable (SPEC.md §4). */
+
+/* The toggle is space-between, so the label takes the slack and the tag sits
+   next to the chevron rather than pushing it off the right edge. */
+.sidebar-section-unavailable .sidebar-section-label {
+  margin-right: auto;
+}
+
+.sidebar-section-unavailable .sidebar-section-label,
+.sidebar-section-unavailable .sidebar-section-chevron {
+  color: var(--text-secondary);
+}
+
+.sidebar-section-tag {
+  flex: none;
+  font-size: var(--text-xs, 0.6875rem);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  background: var(--surface-sunken);
+  border-radius: 999px;
+  padding: 0.125rem 0.5rem;
+  white-space: nowrap;
+}
+
+.sidebar-unavailable-note {
+  margin: 0;
+  padding: var(--space-1, 0.25rem) 0 var(--space-2, 0.5rem);
+  color: var(--text-secondary);
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+@media (prefers-contrast: more) {
+  .sidebar-section-tag {
+    border: 0.0625rem solid currentColor;
+  }
+}
