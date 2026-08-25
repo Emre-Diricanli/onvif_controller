@@ -195,11 +195,19 @@ async function main() {
     username,
     password,
   });
-  const report = await probePlayback(session, {
-    from: options.from,
-    to: options.to,
-    onStep: null,
-  });
+  let report;
+  try {
+    report = await probePlayback(session, {
+      from: options.from,
+      to: options.to,
+      onStep: null,
+    });
+  } finally {
+    // connectDevice opens an onvif camera outside the session registry, so
+    // nothing else will tear it down. Without this the probe can hold the
+    // socket open and hang instead of exiting after printing its report.
+    try { session.cam?.removeAllListeners?.(); } catch { /* nothing to clean up */ }
+  }
   const evidence = sanitize({
     ...report,
     meta: {
