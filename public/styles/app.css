@@ -532,44 +532,53 @@ input, select {
   flex: none;
 }
 
-/* --- Channel picker (multi-source recorders only) ---
- * Pinned between the sidebar header and the scrollable sections so the active
- * channel can never scroll out of sight — forgetting which channel is being
- * edited is the failure mode this exists to prevent. */
-.channel-picker {
-  flex: none;
+/* --- Channel strip (multi-source recorders only) ---
+ * A horizontal radiogroup of channel-number buttons in the top overlay, next
+ * to the profile switcher. It takes the flexible space in the overlay and
+ * scrolls horizontally — it never wraps, so even 32 channels cannot grow
+ * into a block that eats the picture. */
+.channel-strip {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: var(--space-3) var(--space-4);
-  border-bottom: 0.03125rem solid var(--border-strong);
+  gap: 0.125rem;
+  padding: 0.125rem;
+  border-radius: var(--radius-pill);
   background: var(--surface-sunken);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
 }
 
-.channel-picker-label {
-  font-size: var(--text-xs);
-  font-weight: var(--weight-semibold);
+.channel-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.channel-btn {
+  flex: none;
+  min-width: 1.75rem;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
   color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  will-change: transform;
 }
 
-.channel-select {
-  width: 100%;
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
-  border: 0.03125rem solid var(--border-strong);
-  background: var(--surface-solid);
-  color: var(--text);
-  font-size: var(--text-md);
-  font-weight: var(--weight-semibold);
-  letter-spacing: var(--tracking-heading);
+/* The active channel is the safety property of the whole multi-channel UI:
+ * a solid accent fill with contrast text and bold weight — unmistakable over
+ * bright or dark video, never a subtle tint. */
+.channel-btn-active {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-weight: var(--weight-bold);
 }
 
-.channel-select:focus-visible {
+.channel-btn:focus-visible {
   outline: 0.125rem solid var(--accent);
   outline-offset: 0.125rem;
-  border-color: var(--accent);
 }
 
 /* --- Scope divider: separates channel-scoped sections from the device-wide
@@ -1153,20 +1162,21 @@ input, select {
 @media (prefers-contrast: more) {
   .controller-sidebar,
   .sidebar-footer,
-  .channel-picker,
   .sidebar-scope {
     border-color: var(--border-strong);
   }
 
-  .channel-select {
-    border-color: var(--border-strong);
+  /* A defined inset ring keeps the active channel distinct even where the
+   * accent fill itself would lose contrast against the overlay. */
+  .channel-btn-active {
+    box-shadow: inset 0 0 0 0.09375rem var(--accent-contrast);
   }
 
   .sidebar-section-toggle:focus-visible,
   .sidebar-collapse:focus-visible,
   .ptz-pad:focus-visible,
   .zoom-rocker:focus-visible,
-  .channel-select:focus-visible {
+  .channel-btn:focus-visible {
     outline-width: 0.1875rem;
   }
 }
