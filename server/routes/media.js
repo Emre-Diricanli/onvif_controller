@@ -7,6 +7,7 @@ import { startStream, stopStream } from '../stream/pipeline.js';
 import { fetchSnapshot } from '../stream/snapshot.js';
 import { readEncoder, writeEncoder } from '../onvif/encoder.js';
 import { reconfigureStreams, willDisruptStream, isDisruptiveChange } from '../stream/reconfigure.js';
+import { refreshProfiles } from '../onvif/media.js';
 
 const router = Router({ mergeParams: true });
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -77,6 +78,12 @@ router.patch('/encoder', wrap(async (req, res) => {
   // MSE with. A bitrate or GOP nudge does not, and forcing a visible restart
   // for one would be a worse experience than leaving the stream running.
   const restarted = reconfigureStreams(session.id, profileToken, patch);
+
+  // The cached profiles still describe the OLD geometry. Refresh before
+  // replying, or the next stream/start reports a resolution the camera is no
+  // longer producing. Best effort: a stale cache is worse than the write
+  // failing, but not worth failing the write over.
+  try { await refreshProfiles(session); } catch { /* keep the stale cache */ }
 
   res.json({ ...result, streamRestartRequired: disruptive, streamsRestarted: restarted });
 }));

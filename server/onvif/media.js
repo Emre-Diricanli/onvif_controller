@@ -85,3 +85,27 @@ export async function describeProfiles(cam, { host, port, username, password, ct
 export async function getVideoEncoderOptions(cam, profileToken, ctx) {
   return tryCam(cam, 'getVideoEncoderConfigurationOptions', { profileToken }, null, { ctx });
 }
+
+/**
+ * Re-read a session's profiles after the encoder configuration changed.
+ *
+ * `session.profiles` and `session.profileMap` are captured at connect time and
+ * carry the resolution, codec and framerate. Change the encoder and those
+ * become stale: the stream really is 1920x1080 while every API response still
+ * claims 2880x1616, so the stats overlay confidently reports the wrong
+ * geometry. Refresh the cache in place so existing references stay valid.
+ */
+export async function refreshProfiles(session) {
+  const { profiles, profileMap } = await describeProfiles(session.cam, {
+    host: session.host,
+    port: session.port,
+    username: session.username,
+    password: session.password,
+    ctx: session.ctx,
+  });
+
+  session.profiles = profiles;
+  session.profileMap.clear();
+  for (const [token, profile] of profileMap) session.profileMap.set(token, profile);
+  return profiles;
+}
