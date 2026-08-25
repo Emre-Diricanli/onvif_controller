@@ -4,7 +4,7 @@ import dns from 'node:dns/promises';
 import { AppError, mapOnvifError } from '../errors.js';
 import { config } from '../config.js';
 import { callCam, tryCam, asArray, num, authorizeUri } from './util.js';
-import { describeProfiles } from './media.js';
+import { describeProfiles, describeSources } from './media.js';
 import { readPtzCapabilities } from './ptz.js';
 import { readRelayOutputs } from './device.js';
 
@@ -239,6 +239,13 @@ export async function connectDevice({ host, port, username, password }) {
       'On a Hikvision NVR, confirm at least one channel is online and that the ONVIF user has permission to view it.');
   }
 
+  // Refresh explicitly because recorder firmware often does not populate the
+  // library cache during Cam construction. Failure remains non-fatal: profiles
+  // can still stream even when GetVideoSources is broken for an offline input.
+  const videoSources = await tryCam(cam, 'getVideoSources', undefined, cam.videoSources ?? [], { ctx });
+  const sources = describeSources(videoSources, profiles, profileMap, capabilities);
+  const isMultiChannel = sources.length > 1;
+
   // Ask for the relay outputs rather than trusting a capability flag: plenty of
   // devices advertise deviceIO and expose no relays, and vice versa.
   const relays = await readRelayOutputs(cam, config.onvifTimeoutMs);
@@ -261,6 +268,8 @@ export async function connectDevice({ host, port, username, password }) {
     capabilities,
     profiles,
     profileMap,
+    sources,
+    isMultiChannel,
     ptz,
   };
 }

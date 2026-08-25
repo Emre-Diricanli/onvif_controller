@@ -74,12 +74,107 @@ export async function describeProfiles(cam, { host, port, username, password, ct
       ptzConfigurationToken: p?.PTZConfiguration?.$?.token ?? null,
       videoSourceToken: p?.videoSourceConfiguration?.sourceToken ?? null,
       videoSourceConfigToken: p?.videoSourceConfiguration?.$?.token ?? null,
+      videoSourceName: p?.videoSourceConfiguration?.name ?? null,
     });
   }
 
   // Main stream first: it is what an operator means by "the camera".
   profiles.sort((a, b) => (b.video.width ?? 0) - (a.video.width ?? 0));
   return { profiles, profileMap };
+}
+
+function sourceToken(source) {
+  const token = source?.$?.token ?? source?.token;
+  return typeof token === 'string' && token.length > 0 ? token : null;
+}
+
+function suppliedName(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+/** Group the client-safe profiles by their ONVIF VideoSource token. */
+export function describeSources(rawSources, profiles, profileMap, { imaging = false } = {}) {
+  const realSources = asArray(rawSources);
+  const grouped = new Map();
+  const sources = [];
+
+  for (const raw of realSources) {
+    const token = sourceToken(raw);
+    if (!token || grouped.has(token)) continue;
+    const source = {
+      token,
+      label: null,
+      profiles: [],
+      ptzSupported: false,
+      imagingSupported: Boolean(imaging),
+    };
+    grouped.set(token, { source, sourceName: suppliedName(raw?.name), names: [], profileNames: [] });
+    sources.push(source);
+  }
+
+  const ungrouped = [];
+  for (const profile of profiles) {
+    const detail = profileMap.get(profile.token);
+    // With exactly one real source there is no ambiguity: this preserves the
+    // existing single-camera behavior for devices that publish a placeholder
+    // or omit sourceToken. Never make this inference on a recorder.
+    const group = grouped.get(detail?.videoSourceToken)
+      ?? (grouped.size === 1 ? grouped.values().next().value : null);
+    if (!group) {
+      ungrouped.push(profile);
+      continue;
+    }
+    group.source.profiles.push(profile);
+    group.source.ptzSupported ||= Boolean(profile.ptzSupported);
+    const name = suppliedName(detail?.videoSourceName);
+    if (name) group.names.push(name);
+    const profileName = suppliedName(profile.name);
+    if (profileName) group.profileNames.push(profileName);
+  }
+
+  // A source-configuration name is useful only when it distinguishes this
+  // source. Generic repeated names such as "VideoSourceConfig" do not.
+  const nameCounts = new Map();
+  const sourceNameCounts = new Map();
+  const profileNameCounts = new Map();
+  for (const group of grouped.values()) {
+    if (group.sourceName) sourceNameCounts.set(group.sourceName, (sourceNameCounts.get(group.sourceName) ?? 0) + 1);
+    for (const name of new Set(group.names)) nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+    for (const name of new Set(group.profileNames)) profileNameCounts.set(name, (profileNameCounts.get(name) ?? 0) + 1);
+  }
+  for (const [index, source] of sources.entries()) {
+    const group = grouped.get(source.token);
+    const uniqueSourceName = sourceNameCounts.get(group.sourceName) === 1 ? group.sourceName : null;
+    const uniqueConfigName = group.names.find((name) => nameCounts.get(name) === 1);
+    const distinctProfileNames = [...new Set(group.profileNames)];
+    const uniqueProfileName = distinctProfileNames.length === 1
+      && profileNameCounts.get(distinctProfileNames[0]) === 1 ? distinctProfileNames[0] : null;
+    source.label = uniqueSourceName ?? uniqueConfigName ?? uniqueProfileName ?? `Channel ${index + 1}`;
+  }
+
+  if (ungrouped.length) {
+    sources.push({
+      token: null,
+      label: 'Unknown source',
+      profiles: ungrouped,
+      ptzSupported: ungrouped.some((profile) => profile.ptzSupported),
+      imagingSupported: false,
+    });
+  }
+
+  // If GetVideoSources failed and profiles omitted source tokens, retain the
+  // one-source API shape without pretending the profiles belong to channel 1.
+  if (sources.length === 0) {
+    sources.push({
+      token: null,
+      label: 'Unknown source',
+      profiles: [],
+      ptzSupported: false,
+      imagingSupported: false,
+    });
+  }
+
+  return sources;
 }
 
 export async function getVideoEncoderOptions(cam, profileToken, ctx) {
@@ -107,5 +202,7 @@ export async function refreshProfiles(session) {
   session.profiles = profiles;
   session.profileMap.clear();
   for (const [token, profile] of profileMap) session.profileMap.set(token, profile);
+  session.sources = describeSources(session.cam?.videoSources, profiles, session.profileMap, session.capabilities);
+  session.isMultiChannel = session.sources.length > 1;
   return profiles;
 }
