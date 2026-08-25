@@ -389,6 +389,36 @@ async function fanoutEndToEndChecks() {
   check('no snapshot is attached by default', payload?.snapshot === null);
   check('no secret appears in the delivered payload', !JSON.stringify(received).includes(SECRET));
 
+  // Regressions found against a live UNIX IPM32R32P NVR. A pull-point event
+  // carries no profile token — it names its channel in its own Source item —
+  // and its State arrives as a real boolean that must not be coerced to 0.
+  const { buildPayload } = await import('../server/fanout/payload.js');
+  const pullEvent = {
+    topic: 'tns1:VideoSource/MotionAlarm',
+    state: true,
+    utcTime: '2026-08-25T16:45:46.000Z',
+    source: { Source: 'Media7' },
+    data: { State: true },
+  };
+  const pullPayload = buildPayload(session, pullEvent, { profileToken: null });
+  check('a pull-point event resolves its channel from the event Source',
+    pullPayload.source.channel === 'Media7', pullPayload.source.channel);
+  check('a resolved pull-point channel carries its label',
+    pullPayload.source.label === 'Channel 7', pullPayload.source.label);
+
+  // An unrecognized channel is reported as the device stated it, never remapped.
+  const unknownChannel = buildPayload(session, { ...pullEvent, source: { Source: 'Media99' } }, { profileToken: null });
+  check('an unknown channel is reported verbatim, not remapped',
+    unknownChannel.source.channel === 'Media99' && unknownChannel.source.label === null);
+
+  // A boolean State must survive normalization.
+  const { __testing: eventsTesting } = await import('../server/onvif/events.js')
+    .then((m) => ({ __testing: m.__testing ?? null }));
+  if (eventsTesting?.readItems) {
+    const items = eventsTesting.readItems({ simpleItem: { $: { Name: 'State', Value: false } } });
+    check('a boolean State is not coerced to a number', items.State === false, JSON.stringify(items));
+  }
+
   // SSRF: the denylist applies, and RFC1918 stays usable.
   let blocked = false;
   try { validateTargetUrl('http://169.254.169.254/latest/meta-data'); } catch { blocked = true; }

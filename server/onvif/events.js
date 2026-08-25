@@ -25,7 +25,12 @@ function readItems(node) {
     const name = item?.$?.Name ?? item?.name;
     if (!name) continue;
     let value = item?.$?.Value ?? item?.value;
-    if (value === 'true') value = true;
+    // The xml2js parser sometimes hands back a real boolean already. Coercing
+    // that through Number() turns `false` into 0 and loses the state flag
+    // entirely — observed on a UNIX IPM32R32P NVR, where every MotionAlarm
+    // arrived as State:0 with no usable state.
+    if (typeof value === 'boolean') { /* already the right type */ }
+    else if (value === 'true') value = true;
     else if (value === 'false') value = false;
     else if (value !== '' && value !== undefined && !Number.isNaN(Number(value))) value = Number(value);
     out[name] = value;
@@ -108,6 +113,29 @@ export function guardUnsubscribe(cam) {
     }
   };
 
+  // `pullMessages` throws synchronously too — 'You should create pull-point
+  // subscription first!' when the subscription has gone, and 'callback.call is
+  // not a function' when the library's own retry path invokes it without one.
+  // Both escape as uncaught exceptions from the pull loop. Observed live
+  // against a UNIX IPM32R32P NVR.
+  const originalPull = cam.pullMessages;
+  if (typeof originalPull === 'function') {
+    cam.pullMessages = function guardedPullMessages(...args) {
+      const callback = args.find((a) => typeof a === 'function');
+      try {
+        // Normalize the call shape: without a function the library dereferences
+        // `callback.call` unconditionally and throws.
+        const normalized = callback ? args : [...args, () => {}];
+        return originalPull.apply(this, normalized);
+      } catch (err) {
+        if (typeof callback === 'function') {
+          try { callback.call(this, err, null, null); } catch { /* the library's callback threw */ }
+        }
+        return undefined;
+      }
+    };
+  }
+
   cam.__unsubscribeGuarded = true;
 }
 
@@ -165,3 +193,6 @@ export function attachEvents(session) {
 
   return bus;
 }
+
+/** Exposed for tests: the value coercion that a live NVR proved subtle. */
+export const __testing = { readItems };

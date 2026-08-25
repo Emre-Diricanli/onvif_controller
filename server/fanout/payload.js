@@ -45,12 +45,29 @@ export function classify(topic) {
  * attributes detections to the wrong camera, so unknown is strictly better
  * than wrong.
  */
-function resolveSource(session, profileToken) {
+function resolveSource(session, profileToken, event = null) {
   const sources = Array.isArray(session?.sources) ? session.sources : [];
   if (profileToken) {
     const match = sources.find((s) => s.profiles?.some((p) => p.token === profileToken));
     if (match) return match;
   }
+
+  // A pull-point event has no profile — it names its channel directly, in the
+  // message's own Source item. On a 32-channel recorder this is the ONLY way to
+  // attribute a detection: verified against a UNIX IPM32R32P, whose MotionAlarm
+  // events carry Source="Media16" matching a reported video source token.
+  //
+  // This is still an exact token match, never a positional guess.
+  const claimed = event?.source?.Source ?? event?.source?.source ?? event?.source?.VideoSourceConfigurationToken;
+  if (claimed !== undefined && claimed !== null && claimed !== '') {
+    const match = sources.find((s) => String(s.token) === String(claimed));
+    if (match) return match;
+    // The device named a channel we do not recognize. Report what it said
+    // rather than dropping it — an unmatched-but-real token is still useful
+    // downstream, and inventing a different one would be worse.
+    return { token: String(claimed), label: null };
+  }
+
   // A single-source device has no ambiguity: media.js makes the same inference
   // when grouping profiles. Never do this on a recorder.
   if (sources.length === 1) return sources[0];
@@ -58,7 +75,7 @@ function resolveSource(session, profileToken) {
 }
 
 export function buildPayload(session, event, { profileToken } = {}) {
-  const source = resolveSource(session, profileToken);
+  const source = resolveSource(session, profileToken, event);
   return {
     id: randomUUID(),
     source: {
