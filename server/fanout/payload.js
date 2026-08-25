@@ -111,8 +111,16 @@ export function validateTargetUrl(url) {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new AppError('BAD_REQUEST', 'Only http: and https: target URLs are allowed.');
   }
-  // Throws AppError for metadata/link-local hosts. The error message names the
-  // host class being blocked, never any credential embedded in the URL.
-  assertSafeHost(parsed.hostname);
+  // assertSafeHost throws for metadata/link-local hosts, but its message is
+  // written for the connect path ("that address is not a camera"), which is
+  // confusing when the operator is configuring a webhook. Re-word it for this
+  // context while keeping the denylist itself single-source in connect.js.
+  try {
+    assertSafeHost(parsed.hostname);
+  } catch {
+    throw new AppError('BAD_REQUEST',
+      'That webhook host is blocked.',
+      'Link-local and cloud metadata addresses are refused because a webhook target must not be able to reach the host\'s own credentials service. Private LAN addresses are allowed.');
+  }
   return url;
 }

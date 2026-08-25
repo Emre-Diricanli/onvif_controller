@@ -1,4 +1,4 @@
-import { FanoutDispatcher } from './delivery.js';
+import { FanoutDispatcher, registerDispatcher, unregisterDispatcher } from './delivery.js';
 import { buildPayload, signPayload } from './payload.js';
 
 /**
@@ -60,6 +60,7 @@ export function attachFanout(session, targets, { attachSnapshot = null, hooks = 
 
   const dispatcher = new FanoutDispatcher(hooks);
   dispatcher.setTargets(enabled);
+  registerDispatcher(session.id, dispatcher);
 
   const onEvent = (event) => {
     // Nothing in here may throw. This runs inside the ONVIF event listener, and
@@ -74,17 +75,29 @@ export function attachFanout(session, targets, { attachSnapshot = null, hooks = 
         return;
       }
 
-      // Enrich then dispatch exactly ONCE. Dispatching immediately and again
-      // after the snapshot arrives would deliver every event twice, which no
-      // receiver can dedupe cleanly since both copies share an id.
+      // Snapshot config is PER TARGET, so enrichment happens per target rather
+      // than once for the whole event — one webhook may want a JPEG while
+      // another only wants the metadata.
       //
-      // The wait is bounded by the snapshot layer's own timeout, and any
-      // failure resolves to the un-enriched payload — so a dead snapshot
-      // endpoint costs latency on that target, never the event itself.
-      Promise.resolve()
-        .then(() => attachSnapshot(session, payload))
-        .catch(() => payload)
-        .then((enriched) => dispatcher.dispatch(enriched ?? payload, prepareFor));
+      // Each target is enriched then dispatched exactly ONCE. Dispatching
+      // immediately and again after the snapshot arrived would deliver every
+      // event twice, which no receiver can dedupe since both copies share an id.
+      //
+      // Any failure resolves to the un-enriched payload, so a dead snapshot
+      // endpoint costs latency on that target and never the event itself.
+      for (const deliverer of dispatcher.deliverers.values()) {
+        const target = deliverer.target;
+        if (target.enabled === false) continue;
+        Promise.resolve()
+          .then(() => attachSnapshot(payload, target, session, payload.source?.profile ?? null))
+          .catch(() => payload)
+          .then((enriched) => {
+            try {
+              const prepared = prepareFor(target, enriched ?? payload);
+              if (prepared) deliverer.enqueue(prepared);
+            } catch { /* one target's payload failure must not affect others */ }
+          });
+      }
     } catch {
       // A malformed event must not tear down the subscription.
     }
@@ -94,6 +107,7 @@ export function attachFanout(session, targets, { attachSnapshot = null, hooks = 
 
   return () => {
     session.events.removeListener('event', onEvent);
+    unregisterDispatcher(session.id);
     dispatcher.close();
   };
 }

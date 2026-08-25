@@ -310,6 +310,94 @@ async function fanoutDeliveryChecks() {
   check('a config reload preserves delivery state', dispatcher.deliverers.get('good').counters.delivered === 7);
   check('a removed target is torn down', dispatcher.deliverers.size === 1);
   dispatcher.close();
+
+  await fanoutEndToEndChecks();
+}
+
+/**
+ * The full path against a real HTTP receiver: an ONVIF event goes in, a signed
+ * webhook comes out, and the receiver independently verifies the HMAC. A unit
+ * test cannot catch a signature computed over different bytes than were sent.
+ */
+async function fanoutEndToEndChecks() {
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { EventEmitter } = await import('node:events');
+  const { attachFanout } = await import('../server/fanout/index.js');
+  const { validateTargetUrl } = await import('../server/fanout/payload.js');
+
+  const SECRET = 'edge-secret-1234';
+  const received = [];
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      const expected = `sha256=${createHmac('sha256', SECRET).update(body, 'utf8').digest('hex')}`;
+      received.push({
+        path: req.url,
+        sigValid: req.headers['x-onvif-signature'] === expected,
+        idMatches: req.headers['x-onvif-event-id'] === JSON.parse(body).id,
+        payload: JSON.parse(body),
+      });
+      res.writeHead(200); res.end('ok');
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  // Shaped like the real 192.168.12.129: a 32-channel recorder.
+  const session = {
+    id: 'smoke-fanout',
+    host: '192.168.12.129',
+    port: 80,
+    device: { manufacturer: 'UNIX', model: 'IPM32R32P', serial: '00:09:1B:2F:16:2F' },
+    sources: [
+      { token: 'Media1', label: 'Channel 1', profiles: [{ token: 'P1' }] },
+      { token: 'Media7', label: 'Channel 7', profiles: [{ token: 'P13' }] },
+    ],
+    events: new EventEmitter(),
+  };
+
+  const detach = attachFanout(session, [
+    { id: 'all', url: `http://127.0.0.1:${port}/all`, enabled: true, secret: SECRET },
+    { id: 'motion', url: `http://127.0.0.1:${port}/motion`, enabled: true, secret: SECRET, filters: ['motion'] },
+    { id: 'human', url: `http://127.0.0.1:${port}/human`, enabled: true, secret: SECRET, filters: ['human'] },
+  ]);
+
+  session.events.emit('event', {
+    topic: 'tns1:RuleEngine/CellMotionDetector/Motion',
+    state: true,
+    utcTime: '2026-08-25T15:22:01.000Z',
+    data: { IsMotion: true },
+    profileToken: 'P13',
+  });
+  await delay(400);
+  detach();
+
+  check('a signed webhook is delivered end to end', received.length > 0);
+  check('the receiver can verify every HMAC signature', received.length > 0 && received.every((r) => r.sigValid));
+  check('the event id header matches the signed body', received.every((r) => r.idMatches));
+  check('a class filter routes only matching events',
+    received.some((r) => r.path === '/motion') && !received.some((r) => r.path === '/human'),
+    received.map((r) => r.path).join(','));
+
+  const payload = received[0]?.payload;
+  check('the event carries the resolved channel, not channel 1', payload?.source?.channel === 'Media7', payload?.source?.channel);
+  check('the original vendor topic survives normalization',
+    payload?.topic === 'tns1:RuleEngine/CellMotionDetector/Motion' && payload?.class === 'motion');
+  check('device identity travels with the event', payload?.device?.model === 'IPM32R32P');
+  check('no snapshot is attached by default', payload?.snapshot === null);
+  check('no secret appears in the delivered payload', !JSON.stringify(received).includes(SECRET));
+
+  // SSRF: the denylist applies, and RFC1918 stays usable.
+  let blocked = false;
+  try { validateTargetUrl('http://169.254.169.254/latest/meta-data'); } catch { blocked = true; }
+  check('a cloud metadata webhook target is refused', blocked);
+  let lanAllowed = true;
+  try { validateTargetUrl('http://192.168.1.50:9000/hooks'); } catch { lanAllowed = false; }
+  check('a private LAN webhook target is allowed', lanAllowed);
+
+  await new Promise((resolve) => server.close(resolve));
 }
 
 async function main() {

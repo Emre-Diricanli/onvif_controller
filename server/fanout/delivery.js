@@ -281,4 +281,54 @@ export class FanoutDispatcher {
   }
 }
 
-export const __testing = { backoffFor, isRetryable, DEFAULTS };
+/**
+ * Live dispatchers, keyed by session id.
+ *
+ * The API needs per-target delivery stats, but a dispatcher belongs to a
+ * session and routes have no handle on one. This registry is the seam: the
+ * bridge registers on attach and unregisters on detach, so stats reflect only
+ * sessions that actually exist.
+ */
+const activeDispatchers = new Map();
+
+export function registerDispatcher(sessionId, dispatcher) {
+  activeDispatchers.set(sessionId, dispatcher);
+}
+
+export function unregisterDispatcher(sessionId) {
+  activeDispatchers.delete(sessionId);
+}
+
+/**
+ * Aggregate stats across every live session, merged per target id — an
+ * operator cares that "the edge webhook" is healthy, not which browser
+ * session happened to deliver.
+ */
+export function getDeliveryStats(targetId = null) {
+  const merged = new Map();
+
+  for (const dispatcher of activeDispatchers.values()) {
+    for (const stat of dispatcher.stats()) {
+      if (targetId && stat.id !== targetId) continue;
+      const existing = merged.get(stat.id);
+      if (!existing) { merged.set(stat.id, { ...stat, sessions: 1 }); continue; }
+
+      existing.sessions += 1;
+      for (const key of ['enqueued', 'delivered', 'failed', 'droppedQueueFull', 'droppedBreakerOpen', 'retries', 'breakerTrips', 'queued', 'inFlight']) {
+        existing[key] = (existing[key] ?? 0) + (stat[key] ?? 0);
+      }
+      // A target is unhealthy if it is open anywhere, and the most recent
+      // error is the useful one to surface.
+      existing.breakerOpen = existing.breakerOpen || stat.breakerOpen;
+      if (stat.lastError) existing.lastError = stat.lastError;
+      if (stat.lastDeliveryAt && (!existing.lastDeliveryAt || stat.lastDeliveryAt > existing.lastDeliveryAt)) {
+        existing.lastDeliveryAt = stat.lastDeliveryAt;
+      }
+    }
+  }
+
+  const all = [...merged.values()];
+  return targetId ? (all[0] ?? null) : all;
+}
+
+export const __testing = { backoffFor, isRetryable, DEFAULTS, activeDispatchers };
