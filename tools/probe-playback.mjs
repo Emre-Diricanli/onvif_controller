@@ -161,6 +161,16 @@ function printHuman(report, host, from, to) {
     console.log('\nProbe completed. See --json or --out for the recorded evidence.');
     return;
   }
+  // The service table answers "is Profile G here at all", which is the first
+  // thing an operator wants and is not visible from the step list alone.
+  if (report.services) {
+    console.log('\nServices');
+    for (const [name, svc] of Object.entries(report.services)) {
+      const origin = svc?.origin === 'guessed' ? ' (URL guessed, not advertised)' : '';
+      console.log(`  ${name.padEnd(10)} ${svc?.present ? 'present' : 'not advertised'}${origin}`);
+    }
+  }
+
   for (const [name, step] of entries) {
     console.log(`\n${name} — ${statusOf(step)}`);
     const detail = summarizeDetail(step);
@@ -168,6 +178,18 @@ function printHuman(report, host, from, to) {
     if (detail) console.log(`  ${detail}`);
     if (fault && fault !== detail) console.log(`  Device response: ${fault}`);
   }
+
+  // Channel mapping decides whether a player can trust the channel the operator
+  // picked, so it is called out rather than left buried in the JSON.
+  if (report.channelMapping) {
+    console.log('\nChannel mapping');
+    console.log(report.channelMapping.derivable
+      ? '  Recording sources map onto media profiles by exact identifier.'
+      : '  NOT derivable — recording source identifiers do not match media profile video source tokens.');
+  }
+
+  // The conclusion is the answer to the question the probe was run to settle.
+  if (report.conclusion) console.log(`\nConclusion\n  ${report.conclusion}`);
   console.log('');
 }
 
