@@ -639,6 +639,12 @@ input, select {
   flex: none;
 }
 
+.ptz-pad:focus-visible,
+.zoom-rocker:focus-visible {
+  outline: 0.125rem solid var(--accent);
+  outline-offset: 0.1875rem;
+}
+
 .ptz-pad-active {
   border-color: var(--accent);
 }
@@ -943,6 +949,11 @@ input, select {
   overflow-wrap: anywhere;
 }
 
+.events-note {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
 /* --- Device panel --- */
 .device-body {
   display: flex;
@@ -1081,7 +1092,9 @@ input, select {
   }
 
   .sidebar-section-toggle:focus-visible,
-  .sidebar-collapse:focus-visible {
+  .sidebar-collapse:focus-visible,
+  .ptz-pad:focus-visible,
+  .zoom-rocker:focus-visible {
     outline-width: 0.1875rem;
   }
 }

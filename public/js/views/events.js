@@ -44,6 +44,7 @@ export function renderEvents(container, { sessionId, onError }) {
   let reconnectAttempt = 0;
   const knownTopics = new Set();
   let activeFilter = 'all';
+  let droppedTotal = 0;
   const entries = []; // { topic, row } for filtering without re-rendering
 
   const wrap = el('div', 'events');
@@ -62,7 +63,11 @@ export function renderEvents(container, { sessionId, onError }) {
 
   const list = el('ul', 'event-list');
   const empty = el('p', 'panel-status', 'Waiting for events…');
-  wrap.append(toolbar, empty, list);
+  // Shown once the retention cap has dropped older events, so the gap between
+  // the oldest visible event and "now" is never mistaken for silence.
+  const note = el('p', 'events-note');
+  note.hidden = true;
+  wrap.append(toolbar, empty, list, note);
   container.appendChild(wrap);
 
   function setState(label, tone) {
@@ -99,7 +104,14 @@ export function renderEvents(container, { sessionId, onError }) {
     knownTopics.add(topic);
     const option = el('option', '', topic);
     option.value = topic;
-    filter.appendChild(option);
+    // Keep the options alphabetical (after "All topics"): a chatty camera can
+    // emit dozens of distinct topics, and an unsorted select is unsearchable.
+    let before = null;
+    for (const existing of filter.options) {
+      if (existing.value === 'all') continue;
+      if (existing.text.localeCompare(topic) > 0) { before = existing; break; }
+    }
+    filter.insertBefore(option, before);
   }
 
   function addEvent(event) {
@@ -116,9 +128,16 @@ export function renderEvents(container, { sessionId, onError }) {
 
     entries.unshift({ topic, row });
     list.prepend(row);
+    let dropped = 0;
     while (entries.length > MAX_EVENTS) {
       const removed = entries.pop();
       removed.row.remove();
+      dropped += 1;
+    }
+    if (dropped > 0) {
+      droppedTotal += dropped;
+      note.textContent = `Showing the newest ${MAX_EVENTS} events — ${droppedTotal} older ${droppedTotal === 1 ? 'event was' : 'events were'} dropped.`;
+      note.hidden = false;
     }
     applyFilter();
   }

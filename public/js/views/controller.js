@@ -282,6 +282,26 @@ class SidebarSections {
       const toggle = () => this.setOpen(entry, !this.state.expanded.has(def.name));
       button.addEventListener('click', toggle);
       this.cleanups.push(() => button.removeEventListener('click', toggle));
+      // Arrow keys rove focus between section headers (visual order = DOM
+      // order); Escape collapses the focused section. Focus is never moved
+      // anywhere it cannot Tab out of — no trapping.
+      const onKeyDown = (e) => {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          const toggles = [...this.host.querySelectorAll('.sidebar-section-toggle')];
+          const index = toggles.indexOf(button);
+          if (index === -1) return;
+          const next = e.key === 'ArrowDown'
+            ? toggles[(index + 1) % toggles.length]
+            : toggles[(index - 1 + toggles.length) % toggles.length];
+          next.focus();
+        } else if (e.key === 'Escape' && this.state.expanded.has(def.name)) {
+          e.preventDefault();
+          this.setOpen(entry, false);
+        }
+      };
+      button.addEventListener('keydown', onKeyDown);
+      this.cleanups.push(() => button.removeEventListener('keydown', onKeyDown));
     }
   }
 
@@ -533,6 +553,7 @@ export function renderController(root, { session, onDisconnect }) {
   const sidebarState = readSidebarState();
   const sidebar = el('aside', 'controller-sidebar');
   sidebar.setAttribute('aria-label', 'Camera controls');
+  sidebar.id = 'controller-sidebar';
   const sidebarHeader = el('div', 'sidebar-header');
   const sheetGrip = el('div', 'sidebar-sheet-grip');
   sheetGrip.setAttribute('aria-hidden', 'true');
@@ -540,9 +561,13 @@ export function renderController(root, { session, onDisconnect }) {
   const sidebarToggle = el('button', 'btn btn-ghost btn-sm sidebar-collapse');
   sidebarToggle.type = 'button';
   sidebarToggle.setAttribute('aria-label', 'Collapse camera controls');
+  sidebarToggle.setAttribute('aria-controls', 'controller-sidebar');
+  sidebarToggle.setAttribute('aria-expanded', String(!sidebarState.collapsed));
   const videoSidebarToggle = el('button', 'btn btn-ghost btn-sm video-sidebar-toggle', 'Show controls');
   videoSidebarToggle.type = 'button';
   videoSidebarToggle.setAttribute('aria-label', 'Expand camera controls');
+  videoSidebarToggle.setAttribute('aria-controls', 'controller-sidebar');
+  videoSidebarToggle.setAttribute('aria-expanded', String(!sidebarState.collapsed));
   videoSidebarToggle.hidden = true;
   stage.appendChild(videoSidebarToggle);
   sidebarHeader.append(sheetGrip, sidebarTitle, sidebarToggle);
@@ -589,7 +614,9 @@ export function renderController(root, { session, onDisconnect }) {
     sidebarState.collapsed = collapsed;
     writeSidebarState(sidebarState);
     sidebarToggle.setAttribute('aria-label', collapsed ? 'Expand camera controls' : 'Collapse camera controls');
+    sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
     sidebarToggle.textContent = collapsed ? (mobileQuery.matches ? 'Up' : 'Open') : (mobileQuery.matches ? 'Down' : 'Hide');
+    videoSidebarToggle.setAttribute('aria-expanded', String(!collapsed));
     videoSidebarToggle.hidden = !collapsed || mobileQuery.matches;
     if (sidebarSpring) sidebarSpring.stop();
     if (prefersReducedMotion()) {
