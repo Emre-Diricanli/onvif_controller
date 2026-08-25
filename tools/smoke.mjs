@@ -12,6 +12,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import WsClient from 'ws';
 import path from 'node:path';
+import { describeProfiles, PROFILE_DESCRIPTION_CONCURRENCY } from '../server/onvif/media.js';
 
 const MOCK_PORT = 10199;
 const APP_PORT = 8099;
@@ -62,7 +63,105 @@ function cleanup() {
 process.on('exit', cleanup);
 process.on('SIGINT', () => { cleanup(); process.exit(130); });
 
+async function readNdjson(response) {
+  const events = [];
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    const lines = buffer.split('\n');
+    buffer = done ? '' : lines.pop();
+    for (const line of lines) if (line.trim()) events.push(JSON.parse(line));
+    if (done) return events;
+  }
+}
+
+async function profileDescriptionChecks() {
+  console.log('\nBounded profile description');
+  const raw = Array.from({ length: 12 }, (_, index) => ({
+    $: { token: `profile-${index}` },
+    name: `Profile ${index}`,
+    videoEncoderConfiguration: {
+      encoding: 'H264',
+      resolution: { width: index % 3 === 0 ? 1920 : 640, height: 480 },
+      rateControl: { frameRateLimit: 25, bitrateLimit: 1024 },
+    },
+    videoSourceConfiguration: { sourceToken: `source-${Math.floor(index / 2)}` },
+  }));
+
+  function camera({ failStreamToken = null, profiles = raw } = {}) {
+    let active = 0;
+    let peak = 0;
+    const cam = {
+      getProfiles(cb) { cb(null, profiles); },
+      getStreamUri({ profileToken }, cb) {
+        active += 1;
+        peak = Math.max(peak, active);
+        setTimeout(() => {
+          active -= 1;
+          if (profileToken === failStreamToken) cb(new Error('offline channel'));
+          else cb(null, { uri: `rtsp://camera/${profileToken}` });
+        }, (12 - Number(profileToken.split('-')[1])) % 5);
+      },
+      getSnapshotUri({ profileToken }, cb) {
+        active += 1;
+        peak = Math.max(peak, active);
+        setTimeout(() => {
+          active -= 1;
+          cb(null, { uri: `http://camera/${profileToken}.jpg` });
+        }, Number(profileToken.split('-')[1]) % 4);
+      },
+    };
+    return { cam, peak: () => peak };
+  }
+
+  const serialCam = camera();
+  const serial = await describeProfiles(serialCam.cam, {
+    host: '127.0.0.1', port: 80, username: 'user', password: 'secret', ctx: {}, concurrency: 1,
+  });
+  const concurrentCam = camera({ failStreamToken: 'profile-7' });
+  const progress = [];
+  const concurrentWithFailure = await describeProfiles(concurrentCam.cam, {
+    host: '127.0.0.1', port: 80, username: 'user', password: 'secret', ctx: {},
+    onProgress: (event) => progress.push(event),
+  });
+  const comparisonCam = camera();
+  const concurrent = await describeProfiles(comparisonCam.cam, {
+    host: '127.0.0.1', port: 80, username: 'user', password: 'secret', ctx: {},
+  });
+
+  check('concurrent descriptions preserve serial profile order',
+    JSON.stringify(concurrent.profiles) === JSON.stringify(serial.profiles));
+  check('concurrent descriptions preserve serial profileMap order',
+    JSON.stringify([...concurrent.profileMap.keys()]) === JSON.stringify([...serial.profileMap.keys()]));
+  check('profile URI requests stay within the named concurrency bound',
+    comparisonCam.peak() <= PROFILE_DESCRIPTION_CONCURRENCY,
+    `peak=${comparisonCam.peak()} limit=${PROFILE_DESCRIPTION_CONCURRENCY}`);
+  const failedProfile = concurrentWithFailure.profiles.find((entry) => entry.token === 'profile-7');
+  check('a failed stream URI leaves the profile present', Boolean(failedProfile));
+  check('a failed stream URI is retained as null rtsp',
+    concurrentWithFailure.profileMap.get('profile-7')?.rtspUri === null);
+  check('profile progress starts at zero', progress[0]?.completed === 0 && progress[0]?.total === raw.length);
+  check('profile progress is monotonic',
+    progress.every((event, index) => index === 0 || event.completed >= progress[index - 1].completed));
+  check('profile progress terminates at the total',
+    progress.at(-1)?.completed === raw.length && progress.at(-1)?.total === raw.length);
+
+  const singleSerial = await describeProfiles(camera({ profiles: raw.slice(0, 2) }).cam, {
+    host: '127.0.0.1', port: 80, username: 'user', password: 'secret', ctx: {}, concurrency: 1,
+  });
+  const singleConcurrent = await describeProfiles(camera({ profiles: raw.slice(0, 2) }).cam, {
+    host: '127.0.0.1', port: 80, username: 'user', password: 'secret', ctx: {},
+  });
+  check('single-camera profile descriptions are unchanged',
+    JSON.stringify(singleConcurrent.profiles) === JSON.stringify(singleSerial.profiles)
+      && JSON.stringify([...singleConcurrent.profileMap]) === JSON.stringify([...singleSerial.profileMap]));
+}
+
 async function main() {
+  await profileDescriptionChecks();
   console.log('Starting mock camera and app server...');
   start('mock', ['tools/mock-camera.js', String(MOCK_PORT)]);
   start('app', ['server/index.js'], {
@@ -677,6 +776,28 @@ async function main() {
     });
     const dvr = await conn.json();
     check('recorder connects', typeof dvr.sessionId === 'string', JSON.stringify(dvr).slice(0, 180));
+
+    const progressConnect = await fetch(`${BASE}/api/connect`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' },
+      body: JSON.stringify({ host: '127.0.0.1', port: dvrPort, username: 'admin', password: 'admin' }),
+    });
+    const connectEvents = await readNdjson(progressConnect);
+    const profileEvents = connectEvents.filter((event) => event.type === 'progress' && event.phase === 'profiles');
+    check('connect progress response uses NDJSON',
+      /^application\/x-ndjson\b/.test(progressConnect.headers.get('content-type') ?? ''));
+    check('connect profile progress is monotonic',
+      profileEvents.length > 1
+        && profileEvents.every((event, index) => index === 0 || event.completed >= profileEvents[index - 1].completed));
+    check('connect profile progress terminates',
+      profileEvents.at(-1)?.completed === 16 && profileEvents.at(-1)?.total === 16);
+    const completedConnect = connectEvents.find((event) => event.type === 'complete')?.session;
+    check('progress connect returns the same sources and profiles as JSON connect',
+      JSON.stringify(completedConnect?.sources) === JSON.stringify(dvr.sources)
+        && JSON.stringify(completedConnect?.profiles) === JSON.stringify(dvr.profiles));
+    if (completedConnect?.sessionId) {
+      await fetch(`${BASE}/api/session/${completedConnect.sessionId}/disconnect`, { method: 'POST' });
+    }
 
     if (dvr.sessionId) {
       check('recorder is flagged multi-channel', dvr.isMultiChannel === true, `isMultiChannel=${dvr.isMultiChannel}`);

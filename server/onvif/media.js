@@ -1,5 +1,28 @@
 import { callCam, tryCam, asArray, num, authorizeUri } from './util.js';
 
+// Keep enough SOAP requests moving to hide recorder latency without flooding
+// the small embedded CPUs found in many NVRs. This limits requests, not
+// profiles: each profile needs two independent URI lookups.
+export const PROFILE_DESCRIPTION_CONCURRENCY = 8;
+
+function createLimiter(limit) {
+  let active = 0;
+  const waiting = [];
+  const runNext = () => {
+    if (active >= limit || waiting.length === 0) return;
+    active += 1;
+    const { task, resolve } = waiting.shift();
+    resolve(Promise.resolve().then(task).finally(() => {
+      active -= 1;
+      runNext();
+    }));
+  };
+  return (task) => new Promise((resolve) => {
+    waiting.push({ task, resolve });
+    runNext();
+  });
+}
+
 function readVideo(cfg) {
   if (!cfg) return { codec: null, width: null, height: null, fps: null, bitrate: null };
   const encoding = String(cfg.encoding ?? cfg.Encoding ?? '').toUpperCase();
@@ -30,26 +53,42 @@ function readAudio(cfg) {
  * with an offline channel will fault on that one profile while the rest work,
  * and losing the whole connection over it would be wrong.
  */
-export async function describeProfiles(cam, { host, port, username, password, ctx }) {
+export async function describeProfiles(cam, {
+  host, port, username, password, ctx,
+  concurrency = PROFILE_DESCRIPTION_CONCURRENCY,
+  onProgress = null,
+}) {
   const raw = asArray(await callCam(cam, 'getProfiles', undefined, { ctx }));
+  const candidates = raw.filter((p) => Boolean(p?.$?.token ?? p?.token));
+  const limit = createLimiter(Math.max(1, Math.floor(concurrency)));
+  let completed = 0;
+  onProgress?.({ phase: 'profiles', completed, total: candidates.length });
+
+  const descriptions = await Promise.all(candidates.map(async (p) => {
+    const token = p?.$?.token ?? p?.token;
+    const [streamUri, snapshotUri] = await Promise.all([
+      limit(() => tryCam(
+        cam, 'getStreamUri',
+        { protocol: 'RTSP', profileToken: token },
+        null, { ctx },
+      )),
+      limit(() => tryCam(
+        cam, 'getSnapshotUri', { profileToken: token }, null, { ctx },
+      )),
+    ]);
+    completed += 1;
+    onProgress?.({ phase: 'profiles', completed, total: candidates.length });
+    return { p, token, streamUri, snapshotUri };
+  }));
+
   const profiles = [];
   const profileMap = new Map();
 
-  for (const p of raw) {
-    const token = p?.$?.token ?? p?.token;
-    if (!token) continue;
-
+  // Assemble in device order after all lookups finish. Completion order must
+  // never change channel numbering or Map insertion order.
+  for (const { p, token, streamUri, snapshotUri } of descriptions) {
     const video = readVideo(p.videoEncoderConfiguration);
     const audio = readAudio(p.audioEncoderConfiguration);
-
-    const streamUri = await tryCam(
-      cam, 'getStreamUri',
-      { protocol: 'RTSP', profileToken: token },
-      null, { ctx },
-    );
-    const snapshotUri = await tryCam(
-      cam, 'getSnapshotUri', { profileToken: token }, null, { ctx },
-    );
 
     const rtspUri = authorizeUri(streamUri?.uri, { host, port: null, username, password });
     const snapUri = authorizeUri(snapshotUri?.uri, { host, port, username, password });
