@@ -123,9 +123,29 @@ Layout: the video is the surface; controls are translucent layers over/around it
 - **Capabilities** — the honest matrix of what this device actually supports.
 
 ### Capability-driven rendering
-`GET /api/session/:id` returns a capability matrix. **Panels for unsupported
-services are not rendered at all.** A greyed-out disabled control is worse than
-an absent one — it implies the app is broken rather than the camera being fixed.
+`GET /api/session/:id` returns a capability matrix. Every panel the app knows
+how to render is **always listed**, so the operator can see the tool's full
+surface and never has to wonder whether a feature is missing because the device
+lacks it or because it was never built.
+
+A panel the device cannot support is **not** rendered as a greyed-out clone of
+the working control — that implies the app is broken rather than the camera
+being limited, and it invites clicks that go nowhere. Instead the section
+renders with its **body replaced by a stated reason**: what is unavailable, and
+why, in the device's terms.
+
+The three states are:
+
+| State | Rendering |
+| --- | --- |
+| **Available** | The working panel. |
+| **Unavailable** | Section header, dimmed, with an "Unavailable" tag. Body is one sentence naming the reason — never disabled inputs. |
+| **Unavailable on this channel** | Same, but the reason names the channel, because a sibling channel may support it. |
+
+The reason must be honest and specific to what was observed. "This device does
+not advertise the ONVIF Imaging service" is useful; "Not supported" is not. Never
+assert a cause that was not observed — if the device simply did not report a
+service, say that, rather than guessing at firmware or vendor.
 
 ## 5. Streaming design
 
