@@ -6,12 +6,15 @@ import { WebSocketServer } from 'ws';
 
 import { config, warnIfExposed } from './config.js';
 import { errorMiddleware, AppError } from './errors.js';
-import { getSession, shutdownAllSessions, onSessionDestroyed } from './sessions.js';
+import { getSession, shutdownAllSessions, onSessionDestroyed, onSessionCreated } from './sessions.js';
 import sessionRoutes from './routes/session.js';
 import mediaRoutes from './routes/media.js';
 import ptzRoutes from './routes/ptz.js';
 import imagingRoutes from './routes/imaging.js';
 import deviceRoutes from './routes/device.js';
+import fanoutRoutes from './routes/fanout.js';
+import { attachFanout } from './fanout/index.js';
+import { getTargets, ensureTargetsLoaded, targetLoadErrors, attachSnapshot } from './fanout/config.js';
 import * as pipeline from './stream/pipeline.js';
 import { handleStreamSocket } from './stream/ws.js';
 import { handleEventsSocket } from './ws/events.js';
@@ -57,6 +60,7 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true, ffmpeg: Boolean(config.ffmpegPath) });
 });
 
+app.use('/api', fanoutRoutes);
 app.use('/api', sessionRoutes);
 app.use('/api/session/:id', mediaRoutes);
 app.use('/api/session/:id/ptz', ptzRoutes);
@@ -112,8 +116,36 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 // Tearing down a session must also tear down anything streaming from it.
+const fanoutDetachers = new Map();
+
 onSessionDestroyed((sessionId) => {
   try { pipeline.stopAllForSession(sessionId); } catch { /* ignore */ }
+  const detach = fanoutDetachers.get(sessionId);
+  if (detach) {
+    fanoutDetachers.delete(sessionId);
+    try { detach(); } catch { /* ignore */ }
+  }
+});
+
+/**
+ * Attach webhook fan-out to each new session.
+ *
+ * Fan-out lives as long as the session, not the browser tab — and no longer.
+ * When the operator disconnects, delivery stops (FANOUT.md "Lifetime").
+ * Configuration is server-side via FANOUT_CONFIG; with no config file the
+ * dispatcher has no targets and attachFanout is a no-op, so the feature stays
+ * completely inert unless it was deliberately turned on.
+ */
+onSessionCreated((session) => {
+  try {
+    const targets = getTargets();
+    if (!targets.length) return;
+    const detach = attachFanout(session, targets, { attachSnapshot });
+    fanoutDetachers.set(session.id, detach);
+  } catch (err) {
+    // An event bridge must never prevent a camera from connecting.
+    console.warn('  fan-out could not attach to this session:', String(err?.message ?? err));
+  }
 });
 
 let shuttingDown = false;
@@ -151,6 +183,14 @@ process.on('unhandledRejection', (reason) => {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
+// Kick the target load off before accepting connections. A bad config file
+// degrades to "fan-out disabled" rather than preventing the app from starting,
+// so this promise never rejects.
+const fanoutReady = ensureTargetsLoaded().catch((err) => {
+  console.warn('  fan-out: target configuration could not be read:', String(err?.message ?? err));
+  return [];
+});
+
 server.listen(config.port, config.host, () => {
   warnIfExposed();
   console.log(`ONVIF Controller  →  http://${config.host}:${config.port}`);
@@ -159,6 +199,20 @@ server.listen(config.port, config.host, () => {
   } else {
     console.log(`  ffmpeg: ${config.ffmpegPath}`);
   }
+
+  // Report what fan-out loaded. The load itself is kicked off before listen()
+  // so a session cannot connect ahead of its targets; this only awaits the
+  // same promise to print the result.
+  fanoutReady.then(() => {
+    const targets = getTargets();
+    const errors = targetLoadErrors();
+    if (targets.length) {
+      console.log(`  fan-out: ${targets.length} webhook target(s) from FANOUT_CONFIG.`);
+    } else if (process.env.FANOUT_CONFIG) {
+      console.warn('  fan-out: FANOUT_CONFIG is set but no usable targets were loaded.');
+    }
+    for (const error of errors) console.warn(`  fan-out: ${error}`);
+  });
 });
 
 export { app, server };

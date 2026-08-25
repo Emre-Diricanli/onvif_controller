@@ -9,10 +9,21 @@ import { closeVendor } from './vendor/index.js';
 /** In-memory only. Credentials must never reach disk. */
 const sessions = new Map();
 const destroyHandlers = new Set();
+const createHandlers = new Set();
 
 export function onSessionDestroyed(handler) {
   destroyHandlers.add(handler);
   return () => destroyHandlers.delete(handler);
+}
+
+/**
+ * Observe new sessions. Optional features (fan-out) subscribe here rather than
+ * being imported into this module, so the session store stays unaware of them
+ * and a broken feature cannot prevent a session from being created.
+ */
+export function onSessionCreated(handler) {
+  createHandlers.add(handler);
+  return () => createHandlers.delete(handler);
 }
 
 export function createSession({ host, port, username, password, cam, device, capabilities, profiles, profileMap, sources, isMultiChannel, ptz }) {
@@ -52,6 +63,11 @@ export function createSession({ host, port, username, password, cam, device, cap
   }
 
   sessions.set(id, session);
+
+  for (const handler of createHandlers) {
+    try { handler(session); } catch { /* an observer must never fail a connect */ }
+  }
+
   return session;
 }
 
