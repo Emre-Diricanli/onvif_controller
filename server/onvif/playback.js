@@ -78,6 +78,16 @@ function assertReadOnly(body) {
  */
 function rawRequest(cam, url, body, timeoutMs) {
   return new Promise((resolve, reject) => {
+    if (!url) {
+      reject(new Error('no service URL to send this request to'));
+      return;
+    }
+    // `_requestPart2` uses options.url directly as the http request options, so
+    // it must be a parsed URL object — a string silently yields
+    // "getaddrinfo ENOTFOUND undefined". `_parseUrl` also applies the library's
+    // preserveAddress rule, which pins the device's self-reported LAN address
+    // back to the address the operator actually reached it on.
+    const parsed = typeof url === 'string' ? cam._parseUrl(url) : url;
     let settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
@@ -95,7 +105,7 @@ function rawRequest(cam, url, body, timeoutMs) {
 
     try {
       cam._request({
-        url,
+        url: parsed,
         body: cam._envelopeHeader() + assertReadOnly(body) + cam._envelopeFooter(),
       }, done);
     } catch (err) {
@@ -271,27 +281,51 @@ async function withSearch(cam, url, timeoutMs, startBody, run) {
   }
 }
 
-/** Pull a SearchToken out of a linerased response without assuming its shape. */
+/**
+ * Pull a SearchToken out of the response without assuming its shape.
+ *
+ * `cam._request` hands back raw xml2js output, where every node is an array —
+ * `{ findRecordingsResponse: [ { searchToken: [ 'TOK' ] } ] }` — not the
+ * flattened form `linerase()` produces elsewhere in the library. Handle both,
+ * plus the `{ _: 'TOK' }` shape xml2js uses for text with attributes.
+ */
+function textOf(value) {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = textOf(item);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (value && typeof value === 'object' && typeof value._ === 'string') return value._;
+  return null;
+}
+
 function findSearchToken(node, depth = 0) {
-  if (!node || typeof node !== 'object' || depth > 6) return null;
-  for (const [key, value] of Object.entries(node)) {
-    if (/^searchToken$/i.test(key)) {
-      if (typeof value === 'string') return value;
-      if (value && typeof value === 'object' && typeof value._ === 'string') return value._;
+  if (!node || typeof node !== 'object' || depth > 8) return null;
+  const entries = Array.isArray(node) ? node.map((v, i) => [String(i), v]) : Object.entries(node);
+  for (const [key, value] of entries) {
+    if (/(^|:)searchToken$/i.test(key)) {
+      const text = textOf(value);
+      if (text) return text;
     }
   }
-  for (const value of Object.values(node)) {
+  for (const [, value] of entries) {
     const found = findSearchToken(value, depth + 1);
     if (found) return found;
   }
   return null;
 }
 
+/** Gather every node whose key matches, across both xml2js and linerased shapes. */
 function collect(node, keyPattern, depth = 0) {
-  if (!node || typeof node !== 'object' || depth > 6) return [];
+  if (!node || typeof node !== 'object' || depth > 8) return [];
   const out = [];
-  for (const [key, value] of Object.entries(node)) {
-    if (keyPattern.test(key)) out.push(...asArray(value));
+  const entries = Array.isArray(node) ? node.map((v, i) => [String(i), v]) : Object.entries(node);
+  for (const [key, value] of entries) {
+    // Array indices are positional, never a match — recurse through them.
+    if (!Array.isArray(node) && keyPattern.test(key)) out.push(...asArray(value));
     else out.push(...collect(value, keyPattern, depth + 1));
   }
   return out;
