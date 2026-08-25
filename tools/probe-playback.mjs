@@ -217,6 +217,14 @@ async function main() {
     username,
     password,
   });
+  // connectDevice returns cam/device/capabilities but NOT host/port — those are
+  // added by createSession in the app. The probe pins every service XAddr to
+  // session.host, so without this it rewrites them to the literal "undefined"
+  // and every search/replay call hangs up. (In the app the session already
+  // carries host/port, so this only matters on this standalone path.)
+  session.host = options.host;
+  session.port = options.port;
+  session.timeoutMs = options.timeout ?? session.timeoutMs;
   let report;
   try {
     report = await probePlayback(session, {
