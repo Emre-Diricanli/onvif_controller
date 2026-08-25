@@ -6,6 +6,14 @@
 // section is absent, never disabled. Multiple sections may remain open.
 // Nothing here is optimistic: every state shown comes from the player, the
 // WebSocket, or a completed API call.
+//
+// Multi-source recorders (DVR/NVR): the sidebar gains a channel picker pinned
+// above the sections; per-source sections (PTZ, Presets, Imaging, Video,
+// Stream URLs) are scoped to the selected channel, echo its label in their
+// headings, and are gated by that channel's own capability flags; device-wide
+// sections (Events, Device, Network, Capabilities) sit behind a divider that
+// marks them as applying to the whole recorder. A single-source device skips
+// all of this and renders exactly the layout described above.
 
 import { createPlayer } from '../player.js';
 import { api, ApiError } from '../api.js';
@@ -261,7 +269,9 @@ class SidebarSections {
       const button = el('button', 'sidebar-section-toggle');
       button.type = 'button';
       const id = `sidebar-section-${def.name.toLowerCase()}`;
-      const label = el('span', 'sidebar-section-label', def.name);
+      // def.heading overrides the visible label (multi-channel sections echo
+      // the channel they act on); def.name stays the stable persistence key.
+      const label = el('span', 'sidebar-section-label', def.heading || def.name);
       const chevron = el('span', 'sidebar-section-chevron', '⌄');
       chevron.setAttribute('aria-hidden', 'true');
       button.append(label, chevron);
@@ -366,7 +376,23 @@ class SidebarSections {
 export function renderController(root, { session, onDisconnect }) {
   const cleanups = [];
   let destroyed = false;
-  let currentProfile = session.profiles && session.profiles[0] ? session.profiles[0].token : null;
+
+  // One connection may front many video sources (DVR/NVR channels). `sources`
+  // is always present on the session — length 1 for a normal camera — so the
+  // data path never branches; only the layout branches on isMultiChannel.
+  // Guard on the payload itself so a session without sources can never half-
+  // render the channel-scoped layout.
+  const sources = Array.isArray(session.sources) ? session.sources : [];
+  const isMultiChannel = Boolean(session.isMultiChannel) && sources.length > 1;
+  let currentSource = sources[0] || null;
+  const channelLabel = (source) =>
+    source.label || `Channel ${sources.indexOf(source) + 1}`;
+  const currentProfiles = () => {
+    const list = currentSource ? currentSource.profiles : session.profiles;
+    return Array.isArray(list) ? list : [];
+  };
+  const initialProfiles = currentProfiles();
+  let currentProfile = initialProfiles.length > 0 ? initialProfiles[0].token : null;
 
   const shell = el('div', 'controller');
 
@@ -415,11 +441,21 @@ export function renderController(root, { session, onDisconnect }) {
   topBar.append(connState, stats);
 
   let profileSegmented = null;
-  if (session.profiles && session.profiles.length > 1) {
+
+  // The switcher lists the current channel's profiles — one or two on a
+  // recorder, so it stays a compact segmented control. Rebuilt on channel
+  // change; a single-source device builds it once, exactly as before.
+  function buildProfileSwitcher() {
+    if (profileSegmented) {
+      profileSegmented.remove();
+      profileSegmented = null;
+    }
+    const profiles = currentProfiles();
+    if (profiles.length <= 1) return;
     profileSegmented = el('div', 'segmented profile-switcher');
     profileSegmented.setAttribute('role', 'group');
     profileSegmented.setAttribute('aria-label', 'Stream profile');
-    for (const p of session.profiles) {
+    for (const p of profiles) {
       const btn = el('button', 'segment', p.name || p.token);
       btn.type = 'button';
       btn.dataset.token = p.token;
@@ -435,6 +471,7 @@ export function renderController(root, { session, onDisconnect }) {
     }
     topBar.appendChild(profileSegmented);
   }
+  buildProfileSwitcher();
 
   stage.appendChild(topBar);
 
@@ -482,31 +519,48 @@ export function renderController(root, { session, onDisconnect }) {
     onError: showError,
   });
 
+  // scope: 'source' sections act on the selected channel; on a multi-source
+  // recorder they are rebuilt per channel, additionally gated by that
+  // channel's own flags via availableOn (a channel with no PTZ renders no PTZ
+  // section — absent, never disabled, SPEC.md §4), and echo the channel label
+  // in their headings. scope: 'device' sections act on the whole recorder and
+  // are visually separated from the channel-scoped ones. On a single-source
+  // device scope and availableOn change nothing: the sections render exactly
+  // as they always have.
   const PANEL_DEFS = [
     {
       name: 'PTZ',
+      scope: 'source',
       available: () => Boolean(session.capabilities && session.capabilities.ptz && session.ptz),
+      availableOn: (source) => source.ptzSupported !== false,
       build: (c) => renderJoystick(c, { ...ctx() }),
     },
     {
       name: 'Presets',
+      scope: 'source',
       available: () => Boolean(session.capabilities && session.capabilities.ptz && session.ptz && session.ptz.presetsSupported),
+      availableOn: (source) => source.ptzSupported !== false,
       build: (c) => renderPresets(c, { ...ctx() }),
     },
     {
       name: 'Imaging',
+      scope: 'source',
       available: () => Boolean(session.capabilities && session.capabilities.imaging),
+      availableOn: (source) => source.imagingSupported !== false,
       build: (c) => renderImaging(c, { ...ctx() }),
     },
     {
       name: 'Events',
+      scope: 'device',
       available: () => Boolean(session.capabilities && session.capabilities.events),
       build: (c) => renderEvents(c, { sessionId: session.sessionId, onError: showError }),
     },
     {
       name: 'Video',
+      scope: 'source',
       // Any profile with an encoder configuration can be reconfigured.
       available: () => Array.isArray(session.profiles) && session.profiles.length > 0,
+      availableOn: (source) => Array.isArray(source.profiles) && source.profiles.length > 0,
       build: (c) => renderEncoder(c, {
         sessionId: session.sessionId,
         profile: currentProfile,
@@ -526,17 +580,21 @@ export function renderController(root, { session, onDisconnect }) {
     },
     {
       name: 'Stream URLs',
+      scope: 'source',
       // Anything with a media profile has something worth copying.
       available: () => Array.isArray(session.profiles) && session.profiles.length > 0,
-      build: (c) => renderStreamUrls(c, { sessionId: session.sessionId, onError: showError }),
+      availableOn: (source) => Array.isArray(source.profiles) && source.profiles.length > 0,
+      build: (c) => renderStreamUrls(c, { sessionId: session.sessionId, profile: currentProfile, onError: showError }),
     },
     {
       name: 'Device',
+      scope: 'device',
       available: () => true,
       build: (c) => renderDevice(c, { sessionId: session.sessionId, onError: showError }),
     },
     {
       name: 'Network',
+      scope: 'device',
       // Every ONVIF device answers the device service; the view itself reports
       // when a particular camera exposes nothing writable.
       available: () => true,
@@ -544,10 +602,24 @@ export function renderController(root, { session, onDisconnect }) {
     },
     {
       name: 'Capabilities',
+      scope: 'device',
       available: () => true,
       build: (c) => renderCapabilities(c, { session }),
     },
   ];
+
+  // Multi-channel: split the definitions into the two scopes. Channel-scoped
+  // sections are gated by the selected channel's flags and echo its label in
+  // their headings, so the scope of an edit is visible at all times. The defs
+  // are re-derived on every channel change, so they always close over the
+  // current channel.
+  const scopedPanelDefs = (scope) => PANEL_DEFS
+    .filter((def) => def.scope === scope)
+    .map((def) => ({
+      ...def,
+      heading: scope === 'source' ? `${def.name} — ${channelLabel(currentSource)}` : def.name,
+      available: () => def.available() && (def.availableOn ? def.availableOn(currentSource) : true),
+    }));
 
   // --- Persistent controls: right sidebar on wide screens, draggable sheet on mobile ---
   const sidebarState = readSidebarState();
@@ -571,9 +643,49 @@ export function renderController(root, { session, onDisconnect }) {
   videoSidebarToggle.hidden = true;
   stage.appendChild(videoSidebarToggle);
   sidebarHeader.append(sheetGrip, sidebarTitle, sidebarToggle);
+
+  // Channel picker — multi-source recorders only. Pinned between the header
+  // and the scrollable sections so the active channel can never scroll out of
+  // sight: forgetting which channel is being edited is exactly the failure
+  // this exists to prevent. A native <select> stays compact at 16 or 32
+  // channels, moves between channels on the arrow keys, and announces its
+  // accessible name and current value for free.
+  let channelSelect = null;
+  let channelPicker = null;
+  if (isMultiChannel) {
+    channelPicker = el('div', 'channel-picker');
+    const pickerLabel = el('label', 'channel-picker-label', 'Channel');
+    pickerLabel.htmlFor = 'channel-select';
+    channelSelect = el('select', 'channel-select');
+    channelSelect.id = 'channel-select';
+    sources.forEach((source, index) => {
+      const option = el('option', '', channelLabel(source));
+      option.value = String(index);
+      channelSelect.appendChild(option);
+    });
+    channelSelect.value = String(sources.indexOf(currentSource));
+    const onChannelPicked = () => selectChannel(Number(channelSelect.value));
+    channelSelect.addEventListener('change', onChannelPicked);
+    cleanups.push(() => channelSelect.removeEventListener('change', onChannelPicked));
+    channelPicker.append(pickerLabel, channelSelect);
+  }
+
   const sidebarScroll = el('div', 'sidebar-scroll');
   const sidebarSectionsHost = el('div', 'sidebar-sections');
   sidebarScroll.appendChild(sidebarSectionsHost);
+
+  // Device-wide sections sit behind a labelled divider so nobody mistakes
+  // 'Network' for a channel setting and re-IPs the whole recorder.
+  let deviceSectionsHost = null;
+  if (isMultiChannel) {
+    const scopeDivider = el('div', 'sidebar-scope');
+    scopeDivider.append(
+      el('p', 'sidebar-scope-title', 'Whole recorder'),
+      el('p', 'sidebar-scope-note', 'The sections below apply to the device itself — every channel at once — not to the selected channel.'),
+    );
+    deviceSectionsHost = el('div', 'sidebar-sections');
+    sidebarScroll.append(scopeDivider, deviceSectionsHost);
+  }
   const sidebarFooter = el('div', 'sidebar-footer');
   const disconnectBtn = el('button', 'btn btn-danger sidebar-disconnect', 'Disconnect');
   disconnectBtn.type = 'button';
@@ -586,10 +698,58 @@ export function renderController(root, { session, onDisconnect }) {
   disconnectBtn.addEventListener('click', disconnect);
   cleanups.push(() => disconnectBtn.removeEventListener('click', disconnect));
   sidebarFooter.appendChild(disconnectBtn);
-  sidebar.append(sidebarHeader, sidebarScroll, sidebarFooter);
+  sidebar.append(sidebarHeader, ...(channelPicker ? [channelPicker] : []), sidebarScroll, sidebarFooter);
   shell.appendChild(sidebar);
 
-  const sections = new SidebarSections(sidebarSectionsHost, PANEL_DEFS, sidebarState, cleanups);
+  // channelSections holds the per-source sections on a recorder — or every
+  // section on a single-source device, which is today's exact layout. It is
+  // torn down and rebuilt on channel change so no panel can keep showing
+  // another channel's values; its per-build listener cleanups run with it.
+  let channelCleanups = [];
+  let channelSections = null;
+  let deviceSections = null;
+
+  function buildChannelSections() {
+    if (channelSections) channelSections.destroy();
+    for (const fn of channelCleanups) fn();
+    channelCleanups = [];
+    sidebarSectionsHost.replaceChildren();
+    channelSections = isMultiChannel
+      ? new SidebarSections(sidebarSectionsHost, scopedPanelDefs('source'), sidebarState, channelCleanups)
+      : new SidebarSections(sidebarSectionsHost, PANEL_DEFS, sidebarState, channelCleanups);
+  }
+
+  // Switching channels retargets everything per-source: the profile switcher,
+  // the scoped sections, and the live stream — which is stopped and restarted
+  // on the new channel's matching profile (main stays main, sub stays sub).
+  function selectChannel(index) {
+    if (destroyed || !isMultiChannel) return;
+    const next = sources[index];
+    if (!next || next === currentSource) return;
+    const previousName = (currentProfiles().find((p) => p.token === currentProfile) || {}).name;
+    currentSource = next;
+    const profiles = currentProfiles();
+    const matching = previousName ? profiles.find((p) => p.name === previousName) : null;
+    currentProfile = (matching || profiles[0] || {}).token || null;
+    if (channelSelect) channelSelect.value = String(index);
+    buildProfileSwitcher();
+    buildChannelSections();
+    stats.hidden = true;
+    player.stop();
+    if (currentProfile) {
+      connLabel.textContent = 'Connecting';
+      connDot.dataset.tone = 'warn';
+      player.start(currentProfile).catch((err) => showError(err instanceof ApiError ? err : new ApiError('STREAM_FAILED', String(err))));
+    } else {
+      connLabel.textContent = 'No profiles';
+      connDot.dataset.tone = 'bad';
+    }
+  }
+
+  buildChannelSections();
+  if (isMultiChannel && deviceSectionsHost) {
+    deviceSections = new SidebarSections(deviceSectionsHost, scopedPanelDefs('device'), sidebarState, cleanups);
+  }
   let sidebarSpring = null;
   let sidebarValue = sidebarState.collapsed ? 1 : 0;
   let dragStartValue = sidebarValue;
@@ -760,7 +920,9 @@ export function renderController(root, { session, onDisconnect }) {
     connLabel.textContent = 'Connecting';
     connDot.dataset.tone = 'warn';
     // PTZ/imaging views are per-profile: rebuild them against the new token.
-    sections.rebuildViews();
+    // On a recorder this rebuilds the channel-scoped sections only; on a
+    // single-source device channelSections holds every section, as before.
+    channelSections.rebuildViews();
     player.stop();
     player.start(token).catch((err) => showError(err instanceof ApiError ? err : new ApiError('STREAM_FAILED', String(err))));
   }
@@ -792,7 +954,9 @@ export function renderController(root, { session, onDisconnect }) {
 
   return () => {
     destroyed = true;
-    sections.destroy();
+    channelSections?.destroy();
+    deviceSections?.destroy();
+    for (const fn of channelCleanups) fn();
     sidebarSpring?.stop();
     player.destroy();
     if (toastTimer) clearTimeout(toastTimer);
