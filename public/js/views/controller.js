@@ -7,13 +7,14 @@
 // Nothing here is optimistic: every state shown comes from the player, the
 // WebSocket, or a completed API call.
 //
-// Multi-source recorders (DVR/NVR): the sidebar gains a channel picker pinned
-// above the sections; per-source sections (PTZ, Presets, Imaging, Video,
-// Stream URLs) are scoped to the selected channel, echo its label in their
-// headings, and are gated by that channel's own capability flags; device-wide
-// sections (Events, Device, Network, Capabilities) sit behind a divider that
-// marks them as applying to the whole recorder. A single-source device skips
-// all of this and renders exactly the layout described above.
+// Multi-source recorders (DVR/NVR): the top overlay gains a channel strip — a
+// horizontal radiogroup of channel-number buttons next to the profile
+// switcher; per-source sections (PTZ, Presets, Imaging, Video, Stream URLs)
+// are scoped to the selected channel, echo its label in their headings, and
+// are gated by that channel's own capability flags; device-wide sections
+// (Events, Device, Network, Capabilities) sit behind a divider that marks
+// them as applying to the whole recorder. A single-source device skips all of
+// this and renders exactly the layout described above.
 
 import { createPlayer } from '../player.js';
 import { api, ApiError } from '../api.js';
@@ -471,6 +472,88 @@ export function renderController(root, { session, onDisconnect }) {
     }
     topBar.appendChild(profileSegmented);
   }
+
+  // Channel strip — multi-source recorders only. A horizontal radiogroup of
+  // channel-NUMBER buttons in the top overlay, next to the profile switcher.
+  // Numbers only: on a 16- or 32-channel recorder digits stay scannable where
+  // 'Channel 15' labels would not — the full label lives in the per-channel
+  // section headings. The strip scrolls horizontally and never wraps, so many
+  // channels cannot grow into a block that eats the picture. The active
+  // channel is rendered unmistakable in CSS; misreading it is the failure the
+  // whole multi-channel feature exists to prevent. A single-source device
+  // builds no strip at all, exactly as before.
+  let channelStrip = null;
+  let channelButtons = [];
+
+  function paintChannelStrip(index) {
+    channelButtons.forEach((btn, i) => {
+      const active = i === index;
+      btn.classList.toggle('channel-btn-active', active);
+      btn.setAttribute('aria-checked', String(active));
+      btn.tabIndex = active ? 0 : -1;
+    });
+    // Programmatic changes (including arrow-key moves) keep the active button
+    // visible inside the horizontally scrolling strip.
+    const activeBtn = channelButtons[index];
+    if (activeBtn) {
+      activeBtn.scrollIntoView({
+        block: 'nearest',
+        inline: 'nearest',
+        behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+      });
+    }
+  }
+
+  function buildChannelStrip() {
+    if (!isMultiChannel) return;
+    channelStrip = el('div', 'channel-strip');
+    channelStrip.setAttribute('role', 'radiogroup');
+    channelStrip.setAttribute('aria-label', 'Channel');
+    sources.forEach((source, index) => {
+      const btn = el('button', 'channel-btn', String(index + 1));
+      btn.type = 'button';
+      btn.setAttribute('role', 'radio');
+      // A bare digit is not an accessible name; announce the channel it
+      // switches to. aria-checked announces which one is current.
+      btn.setAttribute('aria-label', channelLabel(source));
+      cleanups.push(pressable(btn, { scale: 0.92 }));
+      // Commit on click, never on pointerup — the pointerup-commit regression
+      // was fixed once and must not return.
+      const pick = () => {
+        if (destroyed) return;
+        selectChannel(index);
+      };
+      btn.addEventListener('click', pick);
+      cleanups.push(() => btn.removeEventListener('click', pick));
+      // Radiogroup keyboard behaviour: arrows move the selection itself and
+      // focus follows it (wrapping at the ends); Home/End jump to the edges.
+      // Roving tabindex means Tab enters on the current channel and always
+      // leaves the group — no focus trap.
+      const onKeyDown = (e) => {
+        let next = null;
+        if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (index + 1) % sources.length;
+        else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = (index - 1 + sources.length) % sources.length;
+        else if (e.key === 'Home') next = 0;
+        else if (e.key === 'End') next = sources.length - 1;
+        if (next === null) return;
+        e.preventDefault();
+        channelButtons[next].focus();
+        selectChannel(next);
+      };
+      btn.addEventListener('keydown', onKeyDown);
+      cleanups.push(() => btn.removeEventListener('keydown', onKeyDown));
+      channelButtons.push(btn);
+      channelStrip.appendChild(btn);
+    });
+    paintChannelStrip(sources.indexOf(currentSource));
+    topBar.appendChild(channelStrip);
+  }
+
+  // Strip first, then the profile switcher, so the switcher stays the
+  // rightmost control in the overlay exactly as it is today. On channel
+  // change buildProfileSwitcher() re-appends the switcher at the end, which
+  // keeps this order.
+  buildChannelStrip();
   buildProfileSwitcher();
 
   stage.appendChild(topBar);
@@ -644,32 +727,6 @@ export function renderController(root, { session, onDisconnect }) {
   stage.appendChild(videoSidebarToggle);
   sidebarHeader.append(sheetGrip, sidebarTitle, sidebarToggle);
 
-  // Channel picker — multi-source recorders only. Pinned between the header
-  // and the scrollable sections so the active channel can never scroll out of
-  // sight: forgetting which channel is being edited is exactly the failure
-  // this exists to prevent. A native <select> stays compact at 16 or 32
-  // channels, moves between channels on the arrow keys, and announces its
-  // accessible name and current value for free.
-  let channelSelect = null;
-  let channelPicker = null;
-  if (isMultiChannel) {
-    channelPicker = el('div', 'channel-picker');
-    const pickerLabel = el('label', 'channel-picker-label', 'Channel');
-    pickerLabel.htmlFor = 'channel-select';
-    channelSelect = el('select', 'channel-select');
-    channelSelect.id = 'channel-select';
-    sources.forEach((source, index) => {
-      const option = el('option', '', channelLabel(source));
-      option.value = String(index);
-      channelSelect.appendChild(option);
-    });
-    channelSelect.value = String(sources.indexOf(currentSource));
-    const onChannelPicked = () => selectChannel(Number(channelSelect.value));
-    channelSelect.addEventListener('change', onChannelPicked);
-    cleanups.push(() => channelSelect.removeEventListener('change', onChannelPicked));
-    channelPicker.append(pickerLabel, channelSelect);
-  }
-
   const sidebarScroll = el('div', 'sidebar-scroll');
   const sidebarSectionsHost = el('div', 'sidebar-sections');
   sidebarScroll.appendChild(sidebarSectionsHost);
@@ -698,7 +755,7 @@ export function renderController(root, { session, onDisconnect }) {
   disconnectBtn.addEventListener('click', disconnect);
   cleanups.push(() => disconnectBtn.removeEventListener('click', disconnect));
   sidebarFooter.appendChild(disconnectBtn);
-  sidebar.append(sidebarHeader, ...(channelPicker ? [channelPicker] : []), sidebarScroll, sidebarFooter);
+  sidebar.append(sidebarHeader, sidebarScroll, sidebarFooter);
   shell.appendChild(sidebar);
 
   // channelSections holds the per-source sections on a recorder — or every
@@ -731,7 +788,7 @@ export function renderController(root, { session, onDisconnect }) {
     const profiles = currentProfiles();
     const matching = previousName ? profiles.find((p) => p.name === previousName) : null;
     currentProfile = (matching || profiles[0] || {}).token || null;
-    if (channelSelect) channelSelect.value = String(index);
+    paintChannelStrip(index);
     buildProfileSwitcher();
     buildChannelSections();
     stats.hidden = true;
