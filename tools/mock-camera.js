@@ -40,6 +40,9 @@ const SERVICE_BY_NAMESPACE = [
   [/ver20\/ptz/i, 'ptz'],
   [/ver20\/imaging/i, 'imaging'],
   [/ver10\/events|wsn\/b-2/i, 'events'],
+  [/ver10\/recording/i, 'recording'],
+  [/ver10\/replay/i, 'replay'],
+  [/ver10\/search/i, 'search'],
   [/ver10\/device/i, 'device'],
 ];
 
@@ -297,16 +300,152 @@ function valueIn(xml, name) {
   return match ? Number(match[1]) : null;
 }
 
+/**
+ * Profile G (recording / replay / search) emulation.
+ *
+ * MOCK_PLAYBACK_MODE=off (default) leaves the device without any Profile G
+ * service. 'full' answers the whole probe; 'replay-only' advertises recording
+ * and replay but no search; 'broken-search' fails GetRecordingSearchResults so
+ * the probe's EndSearch-on-error path is exercised.
+ */
+const PLAYBACK_MODE = process.env.MOCK_PLAYBACK_MODE ?? 'off';
+
+// Recording source ids deliberately do NOT reuse the media VideoSource_*
+// tokens: real recorders keep a separate namespace, and the probe exists to
+// report when the two cannot be mapped.
+const RECORDINGS = [
+  { token: 'Recording_SRC_CH1', sourceId: 'SRC_CH1', name: 'Channel 1', trackToken: 'Track_SRC_CH1_video' },
+  { token: 'Recording_SRC_CH2', sourceId: 'SRC_CH2', name: 'Channel 2', trackToken: 'Track_SRC_CH2_video' },
+];
+const RECORDING_FROM = new Date(Date.now() - 24 * 3600 * 1000);
+const RECORDING_UNTIL = new Date();
+const iso = (d) => d.toISOString();
+
+/** Each recording covers half the retention window, so spans differ per source. */
+function recordingSpan(i) {
+  const half = (RECORDING_UNTIL - RECORDING_FROM) / 2;
+  return {
+    from: new Date(RECORDING_FROM.getTime() + i * half),
+    until: new Date(RECORDING_FROM.getTime() + (i + 1) * half),
+  };
+}
+
+/** Open search sessions, keyed by SearchToken. EndSearch removes its entry. */
+const searchSessions = new Map();
+let searchSeq = 0;
+
+function playbackSoap(inner) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:tt="http://www.onvif.org/ver10/schema" xmlns:trc="http://www.onvif.org/ver10/recording/wsdl" xmlns:trp="http://www.onvif.org/ver10/replay/wsdl" xmlns:tse="http://www.onvif.org/ver10/search/wsdl">
+<SOAP-ENV:Body>${inner}</SOAP-ENV:Body></SOAP-ENV:Envelope>`;
+}
+
+/** GetServices with the Profile G services appended, XAddrs on this mock. */
+function getServicesWithPlayback() {
+  const name = fixtureFor('device', 'GetServices');
+  const xml = rewriteAddresses(readFileSync(path.join(FIXTURES, `${name}.xml`), 'utf8'));
+  const service = (ns, xaddr) => `<tds:Service><tds:Namespace>${ns}</tds:Namespace>`
+    + `<tds:XAddr>http://${HOST}:${PORT}${xaddr}</tds:XAddr>`
+    + `<tds:Version><tt:Major>2</tt:Major><tt:Minor>42</tt:Minor></tds:Version></tds:Service>`;
+  const extra = [
+    service('http://www.onvif.org/ver10/recording/wsdl', '/onvif/recording_service'),
+    service('http://www.onvif.org/ver10/replay/wsdl', '/onvif/replay_service'),
+  ];
+  if (PLAYBACK_MODE !== 'replay-only') {
+    extra.push(service('http://www.onvif.org/ver10/search/wsdl', '/onvif/search_service'));
+  }
+  return xml.replace('</tds:GetServicesResponse>', `${extra.join('')}</tds:GetServicesResponse>`);
+}
+
+const PLAYBACK_CAPABILITIES = {
+  recording: '<trc:GetServiceCapabilitiesResponse><trc:Capabilities DynamicRecordings="false" DynamicTracks="false" MaxRecordingJobs="0" Options="false" MetadataRecording="false"/></trc:GetServiceCapabilitiesResponse>',
+  replay: '<trp:GetServiceCapabilitiesResponse><trp:Capabilities ReverseReplay="true" ReversePlayback="true" SessionTimeout="PT60S" RTP_RTSP_TCP="true"/></trp:GetServiceCapabilitiesResponse>',
+  search: '<tse:GetServiceCapabilitiesResponse><tse:Capabilities MetadataSearch="true" MaxMatchedResults="100"/></tse:GetServiceCapabilitiesResponse>',
+};
+
+function recordingSourceXml(r) {
+  return `<tt:Source><tt:SourceId>${r.sourceId}</tt:SourceId><tt:Name>${r.name}</tt:Name>`
+    + `<tt:Location>Mock rack</tt:Location><tt:Description>Recorded ${r.name}</tt:Description>`
+    + `<tt:Address>http://${HOST}:${PORT}</tt:Address></tt:Source>`;
+}
+
+function getRecordingsXml() {
+  const items = RECORDINGS.map((r) => `<trc:RecordingItem token="${r.token}">`
+    + '<tt:RecordingConfiguration>'
+    + recordingSourceXml(r)
+    + `<tt:Content>${r.name} footage</tt:Content><tt:MaximumRetentionTime>PT24H</tt:MaximumRetentionTime>`
+    + `<tt:TrackConfiguration><tt:TrackToken>${r.trackToken}</tt:TrackToken><tt:TrackType>Video</tt:TrackType></tt:TrackConfiguration>`
+    + '</tt:RecordingConfiguration>'
+    + `<tt:Tracks><tt:Track TrackToken="${r.trackToken}">`
+    + `<tt:Configuration><tt:TrackType>Video</tt:TrackType><tt:Description>Video from ${r.name}</tt:Description></tt:Configuration>`
+    + '</tt:Track></tt:Tracks>'
+    + '</trc:RecordingItem>').join('');
+  return playbackSoap(`<trc:GetRecordingsResponse>${items}</trc:GetRecordingsResponse>`);
+}
+
+function getRecordingSummaryXml() {
+  return playbackSoap('<trc:GetRecordingSummaryResponse><trc:Summary>'
+    + `<tt:DataFrom>${iso(RECORDING_FROM)}</tt:DataFrom><tt:DataUntil>${iso(RECORDING_UNTIL)}</tt:DataUntil>`
+    + `<tt:NumberRecordings>${RECORDINGS.length}</tt:NumberRecordings>`
+    + '</trc:Summary></trc:GetRecordingSummaryResponse>');
+}
+
+function recordingSearchResultsXml() {
+  const results = RECORDINGS.map((r, i) => {
+    const span = recordingSpan(i);
+    return '<tse:RecordingInformation>'
+      + `<tse:RecordingToken>${r.token}</tse:RecordingToken>`
+      + recordingSourceXml(r)
+      + `<tt:Content>${r.name} footage</tt:Content>`
+      + `<tt:Track TrackToken="${r.trackToken}"><tt:TrackType>Video</tt:TrackType>`
+      + `<tt:TimeSpan><tt:StartTime>${iso(span.from)}</tt:StartTime><tt:EndTime>${iso(span.until)}</tt:EndTime></tt:TimeSpan></tt:Track>`
+      + '<tt:RecordingStatus>Recorded</tt:RecordingStatus>'
+      + '</tse:RecordingInformation>';
+  }).join('');
+  return playbackSoap('<tse:GetRecordingSearchResultsResponse><tse:ResultList>'
+    + '<tse:SearchState>Completed</tse:SearchState>' + results
+    + '</tse:ResultList></tse:GetRecordingSearchResultsResponse>');
+}
+
+function eventSearchResultsXml() {
+  const results = RECORDINGS.map((r, i) => {
+    const when = new Date(recordingSpan(i).from.getTime() + 60 * 1000);
+    return '<tse:Result>'
+      + `<tt:RecordingToken>${r.token}</tt:RecordingToken><tt:TrackToken>${r.trackToken}</tt:TrackToken>`
+      + `<tt:Time>${iso(when)}</tt:Time>`
+      + '<tt:Event><wsnt:NotificationMessage xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2">'
+      + '<wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:RuleEngine/CellMotionDetector/Motion</wsnt:Topic>'
+      + `<wsnt:Message><tt:Message UtcTime="${iso(when)}"><tt:Source><tt:SimpleItem Name="VideoSourceToken" Value="${r.sourceId}"/></tt:Source><tt:Data><tt:SimpleItem Name="IsMotion" Value="true"/></tt:Data></tt:Message></wsnt:Message>`
+      + '</wsnt:NotificationMessage></tt:Event>'
+      + '<tt:StartStateEvent>false</tt:StartStateEvent>'
+      + '</tse:Result>';
+  }).join('');
+  return playbackSoap('<tse:GetEventSearchResultsResponse><tse:ResultList>'
+    + '<tse:SearchState>Completed</tse:SearchState>' + results
+    + '</tse:ResultList></tse:GetEventSearchResultsResponse>');
+}
+
+function getReplayUriXml(body) {
+  const token = (body.match(/<[^>]*RecordingToken[^>]*>([^<]*)</) ?? [])[1] ?? RECORDINGS[0].token;
+  return playbackSoap('<trp:GetReplayUriResponse>'
+    + `<trp:Uri>rtsp://${HOST}:8554/replay/${token}</trp:Uri>`
+    + '</trp:GetReplayUriResponse>');
+}
+
 const server = http.createServer((req, res) => {
   // Test introspection endpoint. Not part of ONVIF; it exists so the smoke
   // suite can assert that e.g. a Stop really reached the device.
   if (req.method === 'GET' && req.url.startsWith('/__calls')) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(callCounts));
+    const payload = PLAYBACK_MODE === 'off'
+      ? callCounts
+      : { ...callCounts, 'playback.openSearches': searchSessions.size };
+    res.end(JSON.stringify(payload));
     return;
   }
   if (req.method === 'POST' && req.url.startsWith('/__reset')) {
     for (const k of Object.keys(callCounts)) delete callCounts[k];
+    searchSessions.clear();
     res.writeHead(204).end();
     return;
   }
@@ -487,6 +626,96 @@ if (op === 'GetVideoEncoderConfigurationOptions') {
       return;
     }
 
+    // --- Profile G emulation, only when MOCK_PLAYBACK_MODE != 'off' ---
+    if (PLAYBACK_MODE !== 'off') {
+      if (op === 'GetServices') {
+        res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+        res.end(getServicesWithPlayback());
+        return;
+      }
+
+      // The probe is read-only; a mutating recording call is a probe bug, so
+      // count the attempt on /__calls even though the call is rejected.
+      if (service === 'recording' && /^(Create|Delete|Set)/.test(op)) {
+        callCounts['playback.mutatingCalls'] = (callCounts['playback.mutatingCalls'] ?? 0) + 1;
+        res.writeHead(500, { 'Content-Type': 'application/soap+xml' });
+        res.end(fault('Mutating recording operations are not supported by this mock', 'ter:ActionNotSupported'));
+        return;
+      }
+
+      // replay-only advertises no search service; any search call is unsupported.
+      if (service === 'search' && PLAYBACK_MODE === 'replay-only') {
+        res.writeHead(500, { 'Content-Type': 'application/soap+xml' });
+        res.end(fault(`Operation ${op} is not supported`, 'ter:ActionNotSupported'));
+        return;
+      }
+
+      if (PLAYBACK_CAPABILITIES[service] && op === 'GetServiceCapabilities') {
+        res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+        res.end(playbackSoap(PLAYBACK_CAPABILITIES[service]));
+        return;
+      }
+
+      if (service === 'recording' && op === 'GetRecordings') {
+        res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+        res.end(getRecordingsXml());
+        return;
+      }
+
+      if (service === 'recording' && op === 'GetRecordingSummary') {
+        res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+        res.end(getRecordingSummaryXml());
+        return;
+      }
+
+      if (service === 'replay' && op === 'GetReplayUri') {
+        res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+        res.end(getReplayUriXml(body));
+        return;
+      }
+
+      if (service === 'search' && (op === 'FindRecordings' || op === 'FindEvents')) {
+        searchSeq += 1;
+        const token = `SearchToken_${searchSeq}`;
+        searchSessions.set(token, op);
+        res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+        res.end(playbackSoap(`<tse:${op}Response><tse:SearchToken>${token}</tse:SearchToken></tse:${op}Response>`));
+        return;
+      }
+
+      if (service === 'search' && op === 'GetRecordingSearchResults') {
+        if (PLAYBACK_MODE === 'broken-search') {
+          res.writeHead(500, { 'Content-Type': 'application/soap+xml' });
+          res.end(fault('Search session failed on the recorder', 'ter:Action'));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+        res.end(recordingSearchResultsXml());
+        return;
+      }
+
+      if (service === 'search' && op === 'GetEventSearchResults') {
+        res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+        res.end(eventSearchResultsXml());
+        return;
+      }
+
+      if (service === 'search' && op === 'EndSearch') {
+        const token = textIn(body, 'SearchToken');
+        if (token) searchSessions.delete(token);
+        res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+        res.end(playbackSoap('<tse:EndSearchResponse/>'));
+        return;
+      }
+
+      if (['recording', 'replay', 'search'].includes(service)) {
+        console.log(`  [mock] ${service}.${op} -> not supported in playback mode ${PLAYBACK_MODE}`);
+        res.writeHead(500, { 'Content-Type': 'application/soap+xml' });
+        res.end(fault(`Operation ${op} is not supported by this mock`));
+        return;
+      }
+    }
+
     const name = fixtureFor(service, op);
     if (!name) {
       console.log(`  [mock] ${service}.${op} -> no fixture (returning fault)`);
@@ -510,4 +739,5 @@ server.listen(PORT, HOST, () => {
   console.log(`  Encoder mode: ${ENCODER_MODE} (MOCK_ENCODER_MODE=ignore).`);
   console.log(`  Channels: ${CHANNELS} (MOCK_CHANNELS=16 to emulate a DVR).`);
   console.log(`  Network mode: ${NETWORK_MODE} (MOCK_NETWORK_MODE=ignore).`);
+  console.log(`  Playback mode: ${PLAYBACK_MODE} (MOCK_PLAYBACK_MODE=full|replay-only|broken-search).`);
 });
