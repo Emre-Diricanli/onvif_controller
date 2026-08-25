@@ -12,6 +12,7 @@ import mediaRoutes from './routes/media.js';
 import ptzRoutes from './routes/ptz.js';
 import imagingRoutes from './routes/imaging.js';
 import deviceRoutes from './routes/device.js';
+import playbackRoutes from './routes/playback.js';
 import fanoutRoutes from './routes/fanout.js';
 import { attachFanout } from './fanout/index.js';
 import { getTargets, ensureTargetsLoaded, targetLoadErrors, attachSnapshot } from './fanout/config.js';
@@ -66,6 +67,7 @@ app.use('/api/session/:id', mediaRoutes);
 app.use('/api/session/:id/ptz', ptzRoutes);
 app.use('/api/session/:id/imaging', imagingRoutes);
 app.use('/api/session/:id/device', deviceRoutes);
+app.use('/api/session/:id', playbackRoutes);
 
 app.use('/api', (_req, _res, next) => {
   next(new AppError('NOT_FOUND', 'No such API endpoint.'));

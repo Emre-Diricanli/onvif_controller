@@ -1,3 +1,4 @@
+import { api } from '../api.js';
 function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -15,18 +16,6 @@ function labeled(label, value) {
   const row = el('p', 'playback-detail');
   row.append(el('span', 'playback-label', `${label}: `), document.createTextNode(value));
   return row;
-}
-
-async function request(sessionId) {
-  const res = await fetch(`/api/session/${encodeURIComponent(sessionId)}/playback`);
-  const data = await res.json().catch(() => null);
-  if (!res.ok) {
-    const source = data?.error ?? {};
-    const err = new Error(source.message ?? `Request failed with status ${res.status}.`);
-    Object.assign(err, { code: source.code ?? 'INTERNAL', hint: source.hint ?? null, status: res.status });
-    throw err;
-  }
-  return data;
 }
 
 function renderServices(parent, services = {}) {
@@ -117,7 +106,7 @@ export function renderPlayback(container, { sessionId, onError }) {
     wrap = el('section', 'playback');
     wrap.appendChild(el('p', 'panel-status', 'Probing recorded playback services…'));
     container.appendChild(wrap);
-    request(sessionId).then((report) => {
+    api.getPlayback(sessionId).then((report) => {
       if (!destroyed) {
         try { renderReport(wrap, report); } catch (err) { fail(err); }
       }

@@ -121,6 +121,13 @@ export const api = {
   setRelay: (id, token, state) => post(`${s(id)}/device/relay`, { token, state }),
   reboot: (id) => post(`${s(id)}/device/reboot`),
   syncTime: (id) => post(`${s(id)}/device/synctime`),
+
+  // --- Playback (ONVIF Profile G) — read-only probe ---
+  getPlayback: (id) => get(`${s(id)}/playback`),
+
+  // --- Fan-out (server-wide, not session-scoped) ---
+  getFanout: () => get('/api/fanout'),
+  testFanout: (targetId) => post('/api/fanout/test', { id: targetId }),
 };
 
 /** Absolute WebSocket URL for a contract path (same origin). */

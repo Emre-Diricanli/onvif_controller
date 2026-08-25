@@ -430,10 +430,77 @@ async function fanoutEndToEndChecks() {
   await new Promise((resolve) => server.close(resolve));
 }
 
+/**
+ * The always-visible-panel contract (UI-AVAILABILITY.md). These are source-level
+ * assertions rather than DOM tests — there is no browser here — but they pin the
+ * rules that are easy to regress: a disabled control creeping back in, a panel
+ * quietly disappearing again, or a secret reaching the browser.
+ */
+async function uiAvailabilityChecks() {
+  console.log('\nUI availability');
+  const { readFile } = await import('node:fs/promises');
+  const controller = await readFile(new URL('../public/js/views/controller.js', import.meta.url), 'utf8');
+
+  check('no panel is skipped for being unsupported',
+    !/if \(!def\.available\(\)\) continue;/.test(controller));
+  check('an unsupported panel renders a reason instead of controls',
+    /unavailable \? renderUnavailable\(content, unavailable\) : def\.build\(content\)/.test(controller));
+  check('an unsupported panel never runs its build()',
+    !/def\.build\(content\)[\s\S]{0,40}unavailable/.test(controller));
+  check('an unavailable section is tagged for readers who cannot see colour',
+    /sidebar-section-tag['"`,\s]*,?\s*'Unavailable'/.test(controller));
+
+  // The reason text is the whole point: it must describe what was observed.
+  for (const service of ['PTZ', 'Imaging', 'Events']) {
+    check(`the ${service} panel explains why it is unavailable`,
+      new RegExp(`ONVIF ${service} service`).test(controller), 'no observed-fact reason found');
+  }
+  check('a channel-scoped reason says other channels may differ',
+    /Other channels on this (?:recorder|device) may still/.test(controller));
+
+  // We already shipped and fixed a bug that blamed a vendor we had not
+  // observed. Check the reason strings themselves — a comment may legitimately
+  // mention a vendor while documenting exactly that mistake.
+  const reasonText = [...controller.matchAll(/reason(?:OnChannel)?:[^,]*?'((?:[^'\\]|\\.)*)'/g)]
+    .map((m) => m[1]).join('\n');
+  check('a reason is stated for the unavailable panels', reasonText.length > 100, `${reasonText.length} chars`);
+  check('no operator-facing reason names a vendor we did not observe',
+    !/(hikvision|dahua|axis)/i.test(reasonText));
+  check('no reason is a bare "Not supported"',
+    !/^\s*not supported\.?\s*$/im.test(reasonText));
+
+  const styles = await readFile(new URL('../public/styles/app.css', import.meta.url), 'utf8');
+  check('unavailable sections have a dimmed, tagged style',
+    /\.sidebar-section-unavailable/.test(styles) && /\.sidebar-section-tag/.test(styles));
+
+  // Both new panels must exist for every device, available or not.
+  check('a Playback panel is always listed', /name: 'Playback'/.test(controller));
+  check('a Fan-out panel is always listed', /name: 'Fan-out'/.test(controller));
+
+  const fanoutView = await readFile(new URL('../public/js/views/fanout.js', import.meta.url), 'utf8').catch(() => '');
+  if (fanoutView) {
+    check('the fan-out panel never renders a secret value',
+      !/\bt(?:arget)?\.secret\b/.test(fanoutView) && !/\.secret\s*\|\|/.test(fanoutView),
+      'a code path referenced target.secret');
+    check('the fan-out panel is read-only',
+      !/api\.(?:create|delete|update)Fanout|method:\s*'DELETE'/.test(fanoutView));
+  }
+
+  const playbackView = await readFile(new URL('../public/js/views/playback.js', import.meta.url), 'utf8').catch(() => '');
+  if (playbackView) {
+    // Building a player against a mock is the mistake the probe exists to stop.
+    check('the playback panel builds no player against unverified hardware',
+      !/<video|createElement\('video'\)|requestAnimationFrame/.test(playbackView));
+    check('the playback panel warns when channels cannot be mapped',
+      /wrong camera/i.test(playbackView));
+  }
+}
+
 async function main() {
   await profileDescriptionChecks();
   await playbackProbeChecks();
   await fanoutDeliveryChecks();
+  await uiAvailabilityChecks();
   console.log('Starting mock camera and app server...');
   start('mock', ['tools/mock-camera.js', String(MOCK_PORT)]);
   start('app', ['server/index.js'], {
