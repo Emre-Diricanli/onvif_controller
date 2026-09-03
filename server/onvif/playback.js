@@ -196,6 +196,11 @@ function readVersion(service) {
  */
 function pinHost(url, host) {
   if (!url) return null;
+  // A missing host must leave the device's own address alone. Assigning an
+  // absent value produced the literal string "undefined" as the hostname, and
+  // every request to it hung up — observed against a real Profile G recorder,
+  // where the session carried no host field.
+  if (host === undefined || host === null || host === '') return url;
   try {
     const parsed = new URL(url);
     if (parsed.hostname !== host) parsed.hostname = host;

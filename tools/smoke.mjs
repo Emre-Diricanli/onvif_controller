@@ -627,6 +627,10 @@ async function main() {
   // device, so it runs before anything is booted.
   const { governorChecks } = await import('./governor-tests.mjs');
   await governorChecks(check);
+  // Standing regressions for field bug classes that the single mock never
+  // covered. See GOVERNOR.md "The eight bug classes".
+  const { bugClassChecks } = await import('./bugclass-tests.mjs');
+  await bugClassChecks(check);
   console.log('Starting mock camera and app server...');
   start('mock', ['tools/mock-camera.js', String(MOCK_PORT)]);
   start('app', ['server/index.js'], {
