@@ -623,6 +623,10 @@ async function main() {
   await uiAvailabilityChecks();
   await emptyPasswordAuthChecks();
   await containerPackagingChecks();
+  // Governor behavior lives in its own file: it is pure logic with no server or
+  // device, so it runs before anything is booted.
+  const { governorChecks } = await import('./governor-tests.mjs');
+  await governorChecks(check);
   console.log('Starting mock camera and app server...');
   start('mock', ['tools/mock-camera.js', String(MOCK_PORT)]);
   start('app', ['server/index.js'], {
