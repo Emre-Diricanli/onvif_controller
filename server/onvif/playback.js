@@ -1,4 +1,5 @@
 import { asArray, redactUri } from './util.js';
+import { withGovernor } from '../device/governor.js';
 
 /**
  * ONVIF Profile G probe — recorded video playback.
@@ -76,7 +77,16 @@ function assertReadOnly(body) {
  * a search call to the wrong endpoint and returns a confusing fault. Pass an
  * explicit URL instead so that fallback can never engage. (PLAYBACK.md)
  */
+/**
+ * Hand-built SOAP bypasses the `onvif` library, so it must be routed through
+ * the per-host governor explicitly — these are the paths a probe storm would
+ * otherwise escape through (GOVERNOR.md).
+ */
 function rawRequest(cam, url, body, timeoutMs) {
+  return withGovernor(cam?.hostname, () => rawRequestUngoverned(cam, url, body, timeoutMs));
+}
+
+function rawRequestUngoverned(cam, url, body, timeoutMs) {
   return new Promise((resolve, reject) => {
     if (!url) {
       reject(new Error('no service URL to send this request to'));

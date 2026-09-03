@@ -9,6 +9,10 @@ export const CODE_STATUS = {
   SESSION_EXPIRED: 404,
   DEVICE_UNREACHABLE: 502,
   DEVICE_TIMEOUT: 504,
+  // The governor is deliberately refusing to send: the host's request budget is
+  // exhausted, its breaker is open, or it has wedged. 503 rather than 5xx-generic
+  // because the condition is transient and the operator can act on it.
+  DEVICE_BUSY: 503,
   CLOCK_SKEW: 502,
   UNSUPPORTED: 501,
   FFMPEG_MISSING: 500,

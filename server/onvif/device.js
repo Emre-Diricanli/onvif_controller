@@ -1,4 +1,5 @@
 import { AppError, mapOnvifError } from '../errors.js';
+import { withGovernor } from '../device/governor.js';
 import { callCam, tryCam, asArray, num } from './util.js';
 
 const DEV10 = 'http://www.onvif.org/ver10/device/wsdl';
@@ -6,7 +7,16 @@ const esc = (v) => String(v).replace(/[<>&"']/g, (ch) => (
   { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[ch]
 ));
 
-function rawRequest(cam, service, body, timeoutMs = 10000) {
+/**
+ * Hand-built SOAP bypasses the `onvif` library, so it must be routed through
+ * the per-host governor explicitly — these are the paths a probe storm would
+ * otherwise escape through (GOVERNOR.md).
+ */
+function rawRequest(cam, service, body, timeoutMs) {
+  return withGovernor(cam?.hostname, () => rawRequestUngoverned(cam, service, body, timeoutMs));
+}
+
+function rawRequestUngoverned(cam, service, body, timeoutMs = 10000) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const timer = setTimeout(() => {

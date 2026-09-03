@@ -1,12 +1,24 @@
 import { AppError, mapOnvifError } from '../errors.js';
 import { config } from '../config.js';
+import { withGovernor, PRIORITY } from '../device/governor.js';
 
 /**
  * The `onvif` library is callback-based with two shapes: (options, cb) and (cb).
  * Wrap either into a promise with a hard timeout, because several Hikvision
  * firmwares accept a TCP connection and then never answer the SOAP request.
  */
-export function callCam(cam, method, arg, { timeoutMs = config.onvifTimeoutMs, ctx = {} } = {}) {
+/**
+ * Every ONVIF call routes through the per-host governor (GOVERNOR.md). `ctx`
+ * already carries {host, port} at nearly every call site, which is what makes
+ * this the single chokepoint: bounding it here bounds ~56 call sites at once.
+ * A call with no host in ctx runs ungoverned rather than failing, so wiring
+ * this in cannot break a caller that has not been updated.
+ */
+export function callCam(cam, method, arg, { timeoutMs = config.onvifTimeoutMs, ctx = {}, priority = PRIORITY.normal } = {}) {
+  return withGovernor(ctx?.host, () => rawCallCam(cam, method, arg, { timeoutMs, ctx }), { priority, label: method });
+}
+
+function rawCallCam(cam, method, arg, { timeoutMs, ctx }) {
   return new Promise((resolve, reject) => {
     const fn = cam?.[method];
     if (typeof fn !== 'function') {
