@@ -21,7 +21,11 @@ export const DEFAULTS = {
   deadlineMs: 20000,       // a queued request that waits longer fails honestly
   breakerThreshold: 5,     // consecutive transport failures before opening
   breakerCooldownMs: 30000,
-  wedgeTimeouts: 3,        // consecutive timeouts that look like the wedge
+  // Two is the observed signature, not a guess: on the AR504-32 the port kept
+  // accepting while ONVIF and RTSP each stopped answering. Two protocols timing
+  // out consecutively against a host that is still accepting connections is the
+  // wedge; one is just a slow request.
+  wedgeTimeouts: 2,
 };
 
 /** Interactive work must not queue behind a bulk capability walk. */
@@ -41,12 +45,23 @@ function isTimeout(err) {
 class HostGovernor {
   constructor(host, options = {}, hooks = {}) {
     this.host = host;
-    this.options = { ...DEFAULTS, ...options };
+    // Accept the shorter aliases too: `failureThreshold`/`cooldownMs` read
+    // better at call sites and are what the behavior tests use.
+    const { failureThreshold, cooldownMs, ...rest } = options ?? {};
+    this.options = {
+      ...DEFAULTS,
+      ...rest,
+      ...(failureThreshold === undefined ? {} : { breakerThreshold: failureThreshold }),
+      ...(cooldownMs === undefined ? {} : { breakerCooldownMs: cooldownMs }),
+    };
     this.now = hooks.now ?? (() => Date.now());
     this.setTimer = hooks.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
 
     this.queue = [];
     this.inFlight = 0;
+    this.spacingTimer = null;
+    this.deadlineTimer = null;
+    this.halfOpenProbeInFlight = false;
     this.lastStartedAt = 0;
     this.consecutiveFailures = 0;
     this.consecutiveTimeouts = 0;
@@ -89,8 +104,26 @@ class HostGovernor {
         seq: this.counters.submitted,
         expiresAt: this.now() + deadlineMs,
       });
+      // A deadline must fire even if nothing else ever pumps the queue — with a
+      // full concurrency budget and a slow in-flight request, no other event
+      // would wake it and the caller would wait forever instead of being told
+      // the device is busy.
+      this.#armDeadline();
       this.#pump();
     });
+  }
+
+  /** Wake at the earliest queued deadline so expiry never depends on other traffic. */
+  #armDeadline() {
+    if (this.deadlineTimer || this.queue.length === 0) return;
+    const earliest = Math.min(...this.queue.map((i) => i.expiresAt));
+    const wait = Math.max(0, earliest - this.now());
+    this.deadlineTimer = this.setTimer(() => {
+      this.deadlineTimer = null;
+    this.halfOpenProbeInFlight = false;
+      this.#pump();
+      this.#armDeadline();
+    }, wait);
   }
 
   #nextIndex() {
@@ -118,20 +151,40 @@ class HostGovernor {
       }
     }
 
-    while (this.inFlight < this.options.concurrency && this.queue.length > 0) {
+    // Half-open: once the cooldown has passed, admit exactly ONE probe rather
+    // than releasing the whole queue at a device that may still be unhealthy.
+    // Flooding it the instant the timer expires is how a recovering device gets
+    // knocked over again.
+    const halfOpen = this.openUntil > 0 && !this.breakerOpen && this.consecutiveFailures === 0;
+    const cap = halfOpen ? 1 : this.options.concurrency;
+    if (halfOpen && (this.halfOpenProbeInFlight || this.inFlight > 0)) return;
+
+    while (this.inFlight < cap && this.queue.length > 0) {
       const wait = this.options.minSpacingMs - (this.now() - this.lastStartedAt);
       if (wait > 0) {
         // Re-pump after the spacing floor rather than starting early.
-        const timer = this.setTimer(() => this.#pump(), wait);
-        timer?.unref?.();
+        //
+        // Deliberately NOT unref'd: this timer owns queued work that has already
+        // been promised to a caller. An unref'd timer does not hold the event
+        // loop open, so a process with nothing else pending would exit — or a
+        // test would hang — with those promises never settling.
+        if (this.spacingTimer) return;
+        this.spacingTimer = this.setTimer(() => {
+          this.spacingTimer = null;
+    this.deadlineTimer = null;
+    this.halfOpenProbeInFlight = false;
+          this.#pump();
+        }, wait);
         return;
       }
       const index = this.#nextIndex();
       if (index === -1) return;
       const [item] = this.queue.splice(index, 1);
       this.inFlight += 1;
+      if (halfOpen) this.halfOpenProbeInFlight = true;
       this.lastStartedAt = this.now();
       this.#run(item);
+      if (halfOpen) return;   // exactly one probe, then wait for its verdict
     }
   }
 
@@ -140,10 +193,14 @@ class HostGovernor {
       const value = await item.fn();
       this.consecutiveFailures = 0;
       this.consecutiveTimeouts = 0;
+      // A successful probe closes the breaker for real.
+      this.openUntil = 0;
+      this.halfOpenProbeInFlight = false;
       this.counters.completed += 1;
       item.resolve(value);
     } catch (err) {
       this.counters.failed += 1;
+      this.halfOpenProbeInFlight = false;
       this.#onFailure(err);
       item.reject(err);
     } finally {
@@ -203,12 +260,26 @@ class HostGovernor {
     this.consecutiveTimeouts = 0;
   }
 
+  /**
+   * A single string state rather than a set of booleans: the UI needs to render
+   * one honest status line, and "half-open" is a real state distinct from both
+   * open and closed.
+   */
+  get breakerState() {
+    if (this.wedged) return 'wedged';
+    if (this.breakerOpen) return 'open';
+    if (this.openUntil > 0) return 'half-open';
+    return 'closed';
+  }
+
   /** The UI must be able to say "device busy" rather than appear to hang. */
   stats() {
     return {
       host: this.host,
-      queued: this.queue.length,
+      queueDepth: this.queue.length,
+      queued: this.queue.length,   // retained: existing callers use this name
       inFlight: this.inFlight,
+      breakerState: this.breakerState,
       breakerOpen: this.breakerOpen,
       wedged: this.wedged,
       wedgeReason: this.wedgeReason,
