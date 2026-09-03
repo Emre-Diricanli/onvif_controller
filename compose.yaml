@@ -1,0 +1,41 @@
+services:
+  onvif-controller:
+    build: .
+    image: onvif-controller:latest
+    container_name: onvif-controller
+    # SECURITY BOUNDARY: this app has NO authentication. Anything that can reach
+    # the port can pan cameras, rewrite network settings, and reboot recorders.
+    # The loopback-only publish address below is the entire security boundary —
+    # never widen it to "8080:8080" (that exposes camera control to the LAN).
+    ports:
+      - '127.0.0.1:8080:8080'
+    environment:
+      # Inside a container 127.0.0.1 is the container's own loopback, so the app
+      # must bind 0.0.0.0 to be reachable through the published port. This is
+      # expected and safe ONLY because of the loopback publish address above.
+      HOST: 0.0.0.0
+      PORT: 8080
+      # Optional overrides — set these in a local .env (never committed) to
+      # change them without editing this file. Defaults mirror server/config.js.
+      ONVIF_TIMEOUT_MS: ${ONVIF_TIMEOUT_MS:-10000}
+      SESSION_IDLE_MS: ${SESSION_IDLE_MS:-1800000}
+      # FANOUT_CONFIG names a JSON file of webhook targets that may contain an
+      # HMAC secret. The secret lives only in that host file — never in this
+      # compose file and never in a committed .env. Unset => fan-out disabled.
+      FANOUT_CONFIG: ${FANOUT_CONFIG:+/etc/onvif/fanout.json}
+    volumes:
+      # Optional, read-only. When FANOUT_CONFIG is unset this mounts /dev/null
+      # and the env var above stays empty, so the app runs with fan-out disabled.
+      - ${FANOUT_CONFIG:-/dev/null}:/etc/onvif/fanout.json:ro
+    restart: unless-stopped
+    # PID 1 reaps children and forwards SIGTERM to the entrypoint's exec'd node
+    # process, whose shutdown path stops ffmpeg children. Without this every
+    # `docker stop` leaks ffmpeg and eats the full kill timeout.
+    init: true
+    healthcheck:
+      # Uses node (guaranteed present in the image) rather than wget/curl.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
