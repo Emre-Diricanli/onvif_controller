@@ -1,0 +1,42 @@
+# Dependencies and package-manager state
+node_modules/
+.npm/
+
+# Version-control metadata and delegated worktrees
+.git/
+.git*
+.delegates/
+delegates/
+.worktrees/
+worktrees/
+delegate/
+worktree/
+
+# Secrets and local configuration
+.env
+.env.*
+**/fanout*.json
+**/webhook*.json
+**/*.local.json
+
+# Logs and runtime artifacts
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.pid
+
+# Editor and operating-system cruft
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Test and documentation inputs are not needed by the runtime image
+tools/
+*.md
