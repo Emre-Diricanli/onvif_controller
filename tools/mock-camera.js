@@ -9,6 +9,9 @@
  *
  * Credentials: any username works. Use the password "wrong" to exercise the
  * UNAUTHORIZED path, and "skew" to exercise the clock-skew warning.
+ *
+ * MOCK_PERSONA=<name> loads one probed device's persona from tools/personas/
+ * (GOVERNOR.md Part 2). With no persona set, behavior is unchanged.
  */
 import http from 'node:http';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
@@ -17,10 +20,24 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(here, '..', 'node_modules', 'onvif', 'test', 'serverMockup');
-const PORT = Number(process.argv[2] ?? 10101);
+
+/**
+ * Device personas (tools/personas/, GOVERNOR.md Part 2): MOCK_PERSONA=<name>
+ * layers one probed device's observed behavior onto this mock. Personas are
+ * additive — with no persona set, every mode and response below is exactly
+ * what it has always been, and the MOCK_* env modes keep their meanings.
+ */
+let personaModule = null;
+if (process.env.MOCK_PERSONA) {
+  const { loadPersona } = await import('./personas/index.js');
+  personaModule = loadPersona(process.env.MOCK_PERSONA);
+}
+const personaDefaults = personaModule?.defaults ?? {};
+
+const PORT = Number(process.argv[2] ?? personaDefaults.port ?? 10101);
 const HOST = '127.0.0.1';
-const IMAGING_MODE = process.env.MOCK_IMAGING_MODE ?? 'default';
-const NETWORK_MODE = process.env.MOCK_NETWORK_MODE ?? 'default';
+const IMAGING_MODE = process.env.MOCK_IMAGING_MODE ?? personaDefaults.imagingMode ?? 'default';
+const NETWORK_MODE = process.env.MOCK_NETWORK_MODE ?? personaDefaults.networkMode ?? 'default';
 
 if (!existsSync(FIXTURES)) {
   console.error(`Fixtures not found at ${FIXTURES}. Run npm install first.`);
@@ -194,7 +211,7 @@ function encoderOptionsXml(token) {
  * the failure this whole feature exists to prevent is a per-channel setting
  * silently landing on channel 1.
  */
-const CHANNELS = Math.max(1, Number(process.env.MOCK_CHANNELS ?? 1));
+const CHANNELS = Math.max(1, Number(process.env.MOCK_CHANNELS ?? personaDefaults.channels ?? 1));
 
 /** Per-channel imaging, so a write to the wrong channel is detectable. */
 const channelImaging = Array.from({ length: CHANNELS }, () => ({
@@ -308,7 +325,7 @@ function valueIn(xml, name) {
  * and replay but no search; 'broken-search' fails GetRecordingSearchResults so
  * the probe's EndSearch-on-error path is exercised.
  */
-const PLAYBACK_MODE = process.env.MOCK_PLAYBACK_MODE ?? 'off';
+const PLAYBACK_MODE = process.env.MOCK_PLAYBACK_MODE ?? personaDefaults.playbackMode ?? 'off';
 
 // Recording source ids deliberately do NOT reuse the media VideoSource_*
 // tokens: real recorders keep a separate namespace, and the probe exists to
@@ -432,7 +449,26 @@ function getReplayUriXml(body) {
     + '</trp:GetReplayUriResponse>');
 }
 
+/**
+ * The live persona instance. It gets the mock's helpers and mutable state;
+ * onRequest sees raw HTTP before any dispatch (a disabled ONVIF endpoint, a
+ * vendor API, the ar504 wedge), onSoap sees each parsed SOAP request after
+ * the shared auth handling. A hook answers by returning true.
+ */
+const persona = personaModule?.create
+  ? personaModule.create({
+      HOST, PORT, CHANNELS, callCounts, recordings: RECORDINGS,
+      fault, soapEnvelope, playbackSoap, textIn, valueIn,
+      readFixture(service, op) {
+        const name = fixtureFor(service, op);
+        return name ? rewriteAddresses(readFileSync(path.join(FIXTURES, `${name}.xml`), 'utf8')) : null;
+      },
+    })
+  : null;
+
 const server = http.createServer((req, res) => {
+  // A persona answers first — before introspection, before fixtures.
+  if (persona?.onRequest?.(req, res)) return;
   // Test introspection endpoint. Not part of ONVIF; it exists so the smoke
   // suite can assert that e.g. a Stop really reached the device.
   if (req.method === 'GET' && req.url.startsWith('/__calls')) {
@@ -471,6 +507,10 @@ const server = http.createServer((req, res) => {
       res.end(fault('Sender not authorized', 'ter:NotAuthorized'));
       return;
     }
+
+    // Persona SOAP behavior (auth quirks, generated events) runs after the
+    // shared auth modes and before the fixture dispatch.
+    if (persona?.onSoap?.({ req, res, body, op, service })) return;
 
     if (!op) {
       res.writeHead(400, { 'Content-Type': 'application/soap+xml' });
@@ -740,4 +780,5 @@ server.listen(PORT, HOST, () => {
   console.log(`  Channels: ${CHANNELS} (MOCK_CHANNELS=16 to emulate a DVR).`);
   console.log(`  Network mode: ${NETWORK_MODE} (MOCK_NETWORK_MODE=ignore).`);
   console.log(`  Playback mode: ${PLAYBACK_MODE} (MOCK_PLAYBACK_MODE=full|replay-only|broken-search).`);
+  if (personaModule) console.log(`  Persona: ${personaModule.name} (MOCK_PERSONA=${process.env.MOCK_PERSONA}).`);
 });
