@@ -24,6 +24,56 @@ The server binds `127.0.0.1` by default. It has no authentication of its own —
 anything that can reach the port can pan the camera and reboot it — so exposing
 it requires an explicit `--host 0.0.0.0`, which prints a warning.
 
+## Run with Docker
+
+The image pins a known-good Node 20 and **ffmpeg**, which is the setup step that
+fails most often. Nothing else about the app changes.
+
+```
+docker compose up
+```
+
+Open http://127.0.0.1:8080.
+
+**The published address is the security boundary.** The app has no
+authentication of its own, so `compose.yaml` publishes to `127.0.0.1` only:
+
+```yaml
+ports: ["127.0.0.1:8080:8080"]   # correct
+ports: ["8080:8080"]             # exposes camera control to your whole LAN
+```
+
+Inside the container the app binds `0.0.0.0` — it has to, or nothing could
+reach it — so it prints its usual "binding 0.0.0.0 exposes full camera control"
+warning on every start. In a container that warning is about the *container's*
+network namespace; what actually decides who can reach the app is the published
+address above. Keep it on `127.0.0.1` unless you have deliberately put an
+authenticated proxy in front.
+
+### What does not work in a container
+
+**Device discovery.** `Discover devices on this network` uses WS-Discovery, UDP
+multicast to `239.255.255.250`, which does not cross Docker's bridge network.
+It will find nothing. Connecting by IP — the normal path — works fine.
+
+If you genuinely need discovery, run with host networking and understand that it
+removes the published-port boundary entirely:
+
+```
+docker run --network host onvif-controller     # discovery works, no port isolation
+```
+
+### Webhook targets
+
+Fan-out targets live in a JSON file that may contain an HMAC secret, so it is
+mounted rather than baked into the image:
+
+```
+FANOUT_CONFIG=./fanout.json docker compose up
+```
+
+Never commit that file, and never put the secret in `compose.yaml`.
+
 ## Hikvision notes
 
 Two things trip up almost every first connection:

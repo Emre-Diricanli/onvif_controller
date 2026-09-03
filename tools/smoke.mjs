@@ -550,12 +550,79 @@ async function emptyPasswordAuthChecks() {
     /noPassword \? '' :/.test(connectJs));
 }
 
+/**
+ * Container packaging. These are static file checks, not a live build — they run
+ * without a Docker daemon so the security-critical mistakes are caught in CI and
+ * on any developer machine.
+ *
+ * The one that matters most is the publish address: this app has no
+ * authentication, so `ports: ["8080:8080"]` would hand camera reboot and network
+ * config to the whole LAN. That must never regress silently.
+ */
+async function containerPackagingChecks() {
+  console.log('\nContainer packaging');
+  const { readFile } = await import('node:fs/promises');
+  const read = async (rel) => readFile(new URL(`../${rel}`, import.meta.url), 'utf8').catch(() => null);
+
+  const compose = await read('compose.yaml') ?? await read('docker-compose.yml');
+  if (compose) {
+    // Every published port must be bound to loopback.
+    const published = [...compose.matchAll(/^\s*-\s*["']?([0-9.:]+:)?(\d+):(\d+)["']?\s*$/gm)];
+    const wide = published.filter((m) => !m[1] || !/^(127\.0\.0\.1|localhost):$/.test(m[1]));
+    check('every published port is bound to loopback', wide.length === 0,
+      wide.map((m) => m[0].trim()).join(', ') || '');
+    check('the compose file explains why the publish address matters',
+      /no authentication|security boundary|camera control/i.test(compose));
+    check('the container binds 0.0.0.0 internally', /HOST[=:]\s*["']?0\.0\.0\.0/.test(compose),
+      'without this the app is unreachable inside a container');
+    check('signals reach the app so ffmpeg children are reaped',
+      /init:\s*true/.test(compose) || /--init/.test(compose));
+    check('no secret is inlined in the compose file',
+      !/(secret|password|passwd)\s*[:=]\s*["']?[A-Za-z0-9._@$-]{6,}/i.test(compose));
+  } else {
+    check('a compose file exists', false, 'no compose.yaml found');
+  }
+
+  const dockerfile = await read('Dockerfile');
+  if (dockerfile) {
+    check('the image installs ffmpeg', /ffmpeg/i.test(dockerfile),
+      'ffmpeg is the main reason this image exists');
+    check('the image runs as a non-root user', /^\s*USER\s+(?!root\b)\S+/mi.test(dockerfile));
+    check('dependencies install reproducibly', /npm ci/.test(dockerfile));
+    check('the image adds no build step', !/tsc|webpack|rollup|esbuild|vite/i.test(dockerfile));
+    check('the image declares a healthcheck', /HEALTHCHECK/i.test(dockerfile));
+  } else {
+    check('a Dockerfile exists', false, 'no Dockerfile found');
+  }
+
+  const ignore = await read('.dockerignore');
+  if (ignore) {
+    // A developer's local fanout.json carries an HMAC secret; baking it into a
+    // layer would ship that secret with the image.
+    for (const pattern of ['node_modules', '.git']) {
+      check(`.dockerignore excludes ${pattern}`, new RegExp(`^\\s*${pattern.replace('.', '\\.')}`, 'm').test(ignore));
+    }
+    check('.dockerignore excludes local webhook config',
+      /fanout|\*\.env|^\s*\.env/mi.test(ignore), 'a local fanout.json can carry an HMAC secret');
+  } else {
+    check('a .dockerignore exists', false, 'no .dockerignore found');
+  }
+
+  const entry = await read('docker/entrypoint.sh');
+  if (entry) {
+    check('the entrypoint execs the app so it receives SIGTERM', /\bexec\b/.test(entry),
+      'without exec, docker stop leaks ffmpeg children');
+    check('the entrypoint verifies ffmpeg is present', /ffmpeg/.test(entry));
+  }
+}
+
 async function main() {
   await profileDescriptionChecks();
   await playbackProbeChecks();
   await fanoutDeliveryChecks();
   await uiAvailabilityChecks();
   await emptyPasswordAuthChecks();
+  await containerPackagingChecks();
   console.log('Starting mock camera and app server...');
   start('mock', ['tools/mock-camera.js', String(MOCK_PORT)]);
   start('app', ['server/index.js'], {
