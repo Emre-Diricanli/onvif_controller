@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { AppError } from '../errors.js';
+import { getGovernor, resetGovernor } from '../device/governor.js';
 import { requireSession } from '../sessions.js';
 import { readDevice, setRelayOutput, reboot, syncTime } from '../onvif/device.js';
 import { readNetwork, writeNetwork } from '../onvif/network.js';
@@ -9,6 +10,18 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
 
 router.get('/', wrap(async (req, res) => {
   res.json(await readDevice(requireSession(req.params.id)));
+}));
+
+// Recovery is scoped to the session's host and must be explicitly requested.
+router.get('/governor', wrap(async (req, res) => {
+  const session = requireSession(req.params.id);
+  res.json(getGovernor(session.host).stats());
+}));
+
+router.post('/governor/reset', wrap(async (req, res) => {
+  const session = requireSession(req.params.id);
+  getGovernor(session.host);
+  res.json(resetGovernor(session.host));
 }));
 
 router.get('/network', wrap(async (req, res) => {

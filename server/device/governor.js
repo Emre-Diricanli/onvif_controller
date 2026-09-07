@@ -36,10 +36,37 @@ export const PRIORITY = { interactive: 0, normal: 5, bulk: 9 };
  * actively refuses is answering — it is simply saying no, and that must not be
  * mistaken for the silent-but-listening failure we are guarding against.
  */
-function isTimeout(err) {
-  const code = err?.code ?? '';
-  if (code === 'DEVICE_TIMEOUT' || code === 'ETIMEDOUT') return true;
-  return /timed? ?out|did not answer/i.test(String(err?.message ?? ''));
+function isTimeout(err, seen = new Set()) {
+  if (!err || seen.has(err)) return false;
+  seen.add(err);
+  const code = err.code ?? '';
+  if (['DEVICE_TIMEOUT', 'ETIMEDOUT', 'ESOCKETTIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT',
+    'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT'].includes(code)) return true;
+  return /timeout|timed? ?out|did not answer/i.test(String(err.message ?? err))
+    || isTimeout(err.cause, seen);
+}
+
+/**
+ * Protocol rejections prove the device is answering, just like a success. Do
+ * not count every rejected promise: unsupported features must never disable a
+ * healthy camera. DEVICE_ERROR is ambiguous: SOAP faults are healthy answers;
+ * count only transport-looking causes (the mapper also preserves these in hint).
+ */
+function isTransportFailure(err, seen = new Set()) {
+  if (!err || seen.has(err)) return false;
+  seen.add(err);
+  const code = err.code ?? '';
+  if (['UNSUPPORTED', 'BAD_REQUEST', 'UNAUTHORIZED', 'NOT_FOUND', 'CLOCK_SKEW',
+    'SESSION_EXPIRED', 'DEVICE_BUSY', 'FFMPEG_MISSING'].includes(code)) return false;
+  if (['DEVICE_TIMEOUT', 'DEVICE_UNREACHABLE', 'ETIMEDOUT', 'ESOCKETTIMEDOUT',
+    'ECONNREFUSED', 'ECONNRESET', 'ECONNABORTED', 'EHOSTUNREACH', 'ENETUNREACH',
+    'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'ERR_SOCKET_CLOSED', 'UND_ERR_SOCKET',
+    'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT'].includes(code)) return true;
+  if (isTransportFailure(err.cause, seen)) return true;
+  const detail = `${err.message ?? err} ${err.hint ?? ''}`;
+  // A SOAP fault can itself mention a timeout; that is still a device response.
+  if (/soap|\bfault\b|\bter:/i.test(detail)) return false;
+  return /timeout|timed? ?out|did not answer|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|socket (?:hang up|error|closed)|connection (?:refused|reset)/i.test(detail);
 }
 
 class HostGovernor {
@@ -210,9 +237,15 @@ class HostGovernor {
   }
 
   #onFailure(err) {
+    if (!isTransportFailure(err)) {
+      this.consecutiveFailures = 0;
+      this.consecutiveTimeouts = 0;
+      this.openUntil = 0;
+      return;
+    }
     this.consecutiveFailures += 1;
 
-    if (isTimeout(err)) {
+    if (isTimeout(err) || isTimeout(err?.hint)) {
       this.consecutiveTimeouts += 1;
       // The observed wedge: TCP still connects, but requests stop being
       // answered. Repeated timeouts against a host that is still accepting
@@ -283,6 +316,9 @@ class HostGovernor {
       breakerOpen: this.breakerOpen,
       wedged: this.wedged,
       wedgeReason: this.wedgeReason,
+      openUntil: this.openUntil,
+      consecutiveFailures: this.consecutiveFailures,
+      consecutiveTimeouts: this.consecutiveTimeouts,
       ...this.counters,
     };
   }
