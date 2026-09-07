@@ -3,7 +3,7 @@ import { AppError } from '../errors.js';
 import { assertFfmpeg } from '../config.js';
 import { requireSession, requireProfile } from '../sessions.js';
 import { redactUri } from '../onvif/util.js';
-import { startStream, stopStream } from '../stream/pipeline.js';
+import { startStream, stopStream, getStream } from '../stream/pipeline.js';
 import { fetchSnapshot } from '../stream/snapshot.js';
 import { readEncoder, writeEncoder } from '../onvif/encoder.js';
 import { reconfigureStreams, willDisruptStream, isDisruptiveChange } from '../stream/reconfigure.js';
@@ -124,9 +124,21 @@ router.post('/stream/start', wrap(async (req, res) => {
 }));
 
 router.post('/stream/stop', wrap(async (req, res) => {
-  requireSession(req.params.id);
+  const session = requireSession(req.params.id);
   const streamId = req.body?.streamId;
   if (!streamId) throw new AppError('BAD_REQUEST', 'A streamId is required.');
+
+  // The WebSocket path (server/stream/ws.js) refuses a stream that is missing
+  // and one that belongs to another session with the identical close code. The
+  // HTTP path must agree: a stream owned by a different session is reported
+  // exactly like one that does not exist, so this response can never confirm
+  // that a foreign streamId is real. Stopping a stream that has already ended
+  // stays a handled not-found envelope, never a crash or a side effect.
+  const stream = getStream(streamId);
+  if (!stream || stream.sessionId !== session.id) {
+    throw new AppError('NOT_FOUND', 'No such stream for this session.');
+  }
+
   stopStream(streamId);
   res.status(204).end();
 }));
