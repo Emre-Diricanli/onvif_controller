@@ -1,5 +1,14 @@
 const BACKOFF_MS = [1_000, 2_000, 4_000, 8_000];
 
+// /stream/start failure codes where only the transcode path failed and the
+// camera itself is fine, so snapshot polling can still deliver a picture —
+// the fallback the README and the server banner promise. Codes that incriminate
+// the camera or the session (DEVICE_UNREACHABLE, DEVICE_TIMEOUT, UNAUTHORIZED,
+// UNSUPPORTED, NOT_FOUND, SESSION_EXPIRED) are excluded on purpose: snapshots
+// come from that same camera, so degrading would promise a fallback that
+// cannot happen. Those keep the honest error screen.
+const SNAPSHOT_FALLBACK_CODES = new Set(['FFMPEG_MISSING', 'STREAM_FAILED']);
+
 /**
  * Calls handler(reason) whenever the page can no longer safely receive the end
  * of an in-progress pointer gesture. Returns a function that removes all hooks.
@@ -149,6 +158,10 @@ export function createPlayer({ video, sessionId }) {
 
   function degrade(detail) {
     if (destroyed || stopping) return;
+    // Re-entry must not arm a second polling chain: pollSnapshot skips a tick
+    // only while a fetch is in flight, so a duplicate degrade with the poll
+    // timer merely pending would leave two timers respawning each other.
+    if (state === 'degraded') return;
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
     if (socket) {
@@ -440,6 +453,14 @@ export function createPlayer({ video, sessionId }) {
       if (generation !== myGeneration) return;
       clearMedia();
       const detail = { code: error.code || 'STREAM_FAILED', message: error.message };
+      if (SNAPSHOT_FALLBACK_CODES.has(detail.code)) {
+        // The player recovered into a working mode, so this resolves instead
+        // of rethrowing — callers treat a rejected start() as "nothing to
+        // show", which is exactly what degrade() avoids.
+        emit('error', detail);
+        degrade({ reason: detail.message, fallback: 'snapshot' });
+        return;
+      }
       setState('error', detail);
       emit('error', detail);
       throw error;
