@@ -5,7 +5,8 @@
  * governor lands with different testing-hook names, adjust only INTEGRATION.
  */
 import { setTimeout as delay } from 'node:timers/promises';
-import { getGovernor, __testing } from '../server/device/governor.js';
+import { AppError } from '../server/errors.js';
+import { getGovernor, resetGovernor, __testing } from '../server/device/governor.js';
 
 const INTEGRATION = {
   // The governor is per-host internally (getGovernor(host).submit(fn, opts));
@@ -50,7 +51,7 @@ const timeoutError = () => Object.assign(new Error('camera timed out'), { code: 
 // A timeout is the wedge signature and latches the host; the circuit breaker is
 // exercised with an ordinary transport failure instead, so the two states stay
 // distinguishable.
-const faultError = () => Object.assign(new Error('camera refused'), { code: 'DEVICE_ERROR' });
+const faultError = () => Object.assign(new Error('connection refused'), { code: 'ECONNREFUSED' });
 const deferred = () => {
   let resolve;
   let reject;
@@ -222,9 +223,86 @@ async function wedgeAndObservabilityChecks(check) {
   await Promise.all([running, queued]);
 }
 
+async function classificationAndRecoveryChecks(check) {
+  console.log('\nDevice governor — protocol answers and operator recovery');
+  const governor = INTEGRATION.create({ minSpacingMs: 0 });
+  const host = 'protocol.test';
+  const reject = (err) => governor.submit(host, () => { throw err; }).catch((error) => error);
+  for (let i = 0; i < 6; i += 1) await reject(new AppError('UNSUPPORTED', 'Not supported'));
+  check('repeated UNSUPPORTED leaves healthy commands available',
+    await governor.submit(host, () => 'healthy').catch(() => 'blocked') === 'healthy');
+  for (const code of ['UNSUPPORTED', 'BAD_REQUEST', 'UNAUTHORIZED', 'NOT_FOUND', 'CLOCK_SKEW', 'DEVICE_ERROR']) {
+    await reject(timeoutError());
+    const error = new AppError(code, 'SOAP fault: operation timeout');
+    const returned = await reject(error);
+    const state = INTEGRATION.state(governor, host);
+    check(`${code} preserves the error and resets both failure streaks`, returned === error
+      && state.consecutiveFailures === 0 && state.consecutiveTimeouts === 0 && !state.wedged);
+  }
+  for (const code of ['ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH', 'ERR_SOCKET_CLOSED']) {
+    const g = new __testing.HostGovernor(code, { minSpacingMs: 0, breakerThreshold: 1 });
+    const error = new AppError('DEVICE_ERROR', 'Device error');
+    error.cause = Object.assign(new Error('transport failure'), { code });
+    await g.submit(() => { throw error; }).catch(() => {});
+    check(`DEVICE_ERROR with ${code} cause opens the breaker`, g.stats().breakerState === 'open');
+  }
+  const mapped = new __testing.HostGovernor('hint.test', { minSpacingMs: 0 });
+  for (let i = 0; i < 2; i += 1) {
+    await mapped.submit(() => { throw new AppError('DEVICE_ERROR', 'Device error', 'socket timeout'); }).catch(() => {});
+  }
+  check('transport timeout hints count toward the wedge', mapped.stats().wedged);
+
+  const recoveryHost = 'operator-recovery.test';
+  const recovery = getGovernor(recoveryHost, { minSpacingMs: 0, breakerCooldownMs: 1 });
+  await recovery.submit(() => { throw timeoutError(); }).catch(() => {});
+  await recovery.submit(() => { throw timeoutError(); }).catch(() => {});
+  await delay(5);
+  check('wedge remains latched after cooldown', recovery.stats().wedged);
+  const reset = resetGovernor(recoveryHost);
+  check('operator reset clears wedge, reason and failure streaks', reset.breakerState === 'closed'
+    && reset.wedgeReason === null && reset.consecutiveFailures === 0 && reset.consecutiveTimeouts === 0);
+  check('reset host accepts commands again', await recovery.submit(() => 'recovered') === 'recovered');
+  recovery.openUntil = Date.now() + 30000;
+  check('operator reset also clears an open breaker', resetGovernor(recoveryHost).breakerState === 'closed');
+  __testing.governors.delete(recoveryHost);
+}
+
+async function recoveryRouteChecks(check) {
+  const { default: router } = await import('../server/routes/device.js');
+  const { createSession, destroySession } = await import('../server/sessions.js');
+  const session = createSession({ host: 'route-recovery.test', capabilities: {}, profiles: [], profileMap: new Map() });
+  const other = getGovernor('other-recovery.test');
+  const governor = getGovernor(session.host, { minSpacingMs: 0 });
+  governor.markWedged('Two consecutive timeouts');
+  other.markWedged('Other host');
+  const call = (path, method, id) => new Promise((resolve) => {
+    const route = router.stack.find((layer) => layer.route?.path === path && layer.route.methods[method]).route;
+    route.stack[0].handle({ params: { id }, body: { host: 'other-recovery.test' } },
+      { json: (body) => resolve({ body }) }, (error) => resolve({ error }));
+  });
+  try {
+    const status = await call('/governor', 'get', session.id);
+    check('status route exposes the session host and wedge reason', status.body?.host === session.host
+      && status.body?.breakerState === 'wedged' && status.body?.wedgeReason === 'Two consecutive timeouts');
+    const denied = await call('/governor/reset', 'post', 'missing-session');
+    check('reset route requires a valid session', denied.error?.code === 'SESSION_EXPIRED' && governor.stats().wedged);
+    const deniedStatus = await call('/governor', 'get', 'missing-session');
+    check('status route requires a valid session', deniedStatus.error?.code === 'SESSION_EXPIRED');
+    const result = await call('/governor/reset', 'post', session.id);
+    check('reset route recovers only the session host', result.body?.breakerState === 'closed' && other.stats().wedged);
+    check('commands work after route recovery', await governor.submit(() => 'healthy') === 'healthy');
+  } finally {
+    destroySession(session.id);
+    __testing.governors.delete(session.host);
+    __testing.governors.delete('other-recovery.test');
+  }
+}
+
 export async function governorChecks(check) {
   await boundedConcurrencyChecks(check);
   await schedulingChecks(check);
   await breakerChecks(check);
   await wedgeAndObservabilityChecks(check);
+  await classificationAndRecoveryChecks(check);
+  await recoveryRouteChecks(check);
 }
