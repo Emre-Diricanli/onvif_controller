@@ -11,6 +11,7 @@ import { AppError } from '../errors.js';
  * trustworthy place to put the only stop signal.
  */
 const MOVE_KEEPALIVE_MS = 1500;
+import { PRIORITY } from '../device/governor.js';
 import { callCam, tryCam, asArray, num, normalized, speed01, toDeviceRange, fromDeviceRange } from './util.js';
 
 function readSpace(space, fallbackMin, fallbackMax) {
@@ -87,10 +88,25 @@ function requirePtz(session) {
  * will happily accumulate a request backlog that keeps the camera moving after
  * release. Keep at most one in-flight move plus one pending, and drop the rest.
  */
-async function coalescedMove(session, profileToken, run) {
+function moveState(session, profileToken) {
   const key = `ptz:${profileToken}`;
-  const state = session.inflight.get(key) ?? { running: false, pending: null };
+  const state = session.inflight.get(key)
+    ?? { running: false, pending: null, epoch: 0, watchdog: null, moving: false };
   session.inflight.set(key, state);
+  return state;
+}
+
+/** Every channel that currently has motion in flight, for teardown. */
+export function movingProfiles(session) {
+  const out = [];
+  for (const [key, state] of session.inflight ?? []) {
+    if (key.startsWith('ptz:') && state?.moving) out.push(key.slice(4));
+  }
+  return out;
+}
+
+async function coalescedMove(session, profileToken, run) {
+  const state = moveState(session, profileToken);
 
   if (state.running) {
     state.pending = run; // newest wins; older intermediate positions are stale
@@ -98,18 +114,46 @@ async function coalescedMove(session, profileToken, run) {
   }
 
   state.running = true;
+  // A Stop bumps the epoch. Capturing it here lets the finally block below tell
+  // whether a Stop landed while this request was in flight — the difference
+  // between resuming a stale move and leaving the camera stopped.
+  const epoch = state.epoch;
   try {
     await run();
   } finally {
     state.running = false;
     const next = state.pending;
     state.pending = null;
-    if (next) coalescedMove(session, profileToken, next).catch(() => {});
+    // Do NOT resume a queued move that a Stop has since superseded. Without
+    // this the sequence move -> stop -> (in-flight move completes) restarts the
+    // camera, which can run it to a hard limit with nobody watching.
+    if (next && state.epoch === epoch) {
+      coalescedMove(session, profileToken, next).catch(() => {});
+    }
   }
 }
 
-/** Cancel any armed dead-man timer for this session. */
-export function disarmMoveWatchdog(session) {
+/**
+ * Cancel armed dead-man timers. Watchdogs are PER CHANNEL: a single shared
+ * timer meant that arming a move on one channel of a recorder disarmed the
+ * guard protecting another, so a channel could be left moving with no backstop.
+ * Omit `profileToken` to disarm every channel (teardown).
+ */
+export function disarmMoveWatchdog(session, profileToken = null) {
+  const clear = (state) => {
+    if (state?.watchdog) {
+      clearTimeout(state.watchdog);
+      state.watchdog = null;
+    }
+  };
+  if (profileToken !== null) {
+    clear(session.inflight?.get(`ptz:${profileToken}`));
+    return;
+  }
+  for (const [key, state] of session.inflight ?? []) {
+    if (key.startsWith('ptz:')) clear(state);
+  }
+  // Legacy single-timer field, in case an older session object still carries it.
   if (session.ptzWatchdog) {
     clearTimeout(session.ptzWatchdog);
     session.ptzWatchdog = null;
@@ -117,13 +161,15 @@ export function disarmMoveWatchdog(session) {
 }
 
 function armMoveWatchdog(session, profileToken) {
-  disarmMoveWatchdog(session);
-  session.ptzWatchdog = setTimeout(() => {
-    session.ptzWatchdog = null;
+  const state = moveState(session, profileToken);
+  disarmMoveWatchdog(session, profileToken);
+  state.moving = true;
+  state.watchdog = setTimeout(() => {
+    state.watchdog = null;
     // Best effort: the client is already gone, so there is nobody to report to.
     stopMove(session, { profileToken, panTilt: true, zoom: true }).catch(() => {});
   }, MOVE_KEEPALIVE_MS);
-  session.ptzWatchdog.unref?.();
+  state.watchdog.unref?.();
 }
 
 export async function continuousMove(session, { profileToken, pan, tilt, zoom }) {
@@ -143,15 +189,26 @@ export async function continuousMove(session, { profileToken, pan, tilt, zoom })
       ...velocity(session, { pan: p, tilt: t, zoom: z }),
       // No timeout: the client is responsible for sending stop. A timeout here
       // makes the camera stutter whenever a keepalive move is a few ms late.
-    }, { ctx: session.ctx });
+    }, { ctx: session.ctx, priority: PRIORITY.interactive });
   });
 }
 
 export async function stopMove(session, { profileToken, panTilt = true, zoom = true }) {
   requirePtz(session);
-  disarmMoveWatchdog(session);
+  // Invalidate anything queued or in flight for this channel BEFORE sending
+  // Stop. Bumping the epoch means a move already on the wire cannot resume the
+  // camera when its response arrives, and dropping `pending` means a queued
+  // move never runs at all.
+  const state = moveState(session, profileToken);
+  state.epoch += 1;
+  state.pending = null;
+  state.moving = false;
+  disarmMoveWatchdog(session, profileToken);
   try {
-    await callCam(session.cam, 'stop', { profileToken, panTilt, zoom }, { ctx: session.ctx });
+    // Interactive priority: a Stop that queues behind a bulk capability walk
+    // leaves the camera moving for as long as that queue takes to drain.
+    await callCam(session.cam, 'stop', { profileToken, panTilt, zoom },
+      { ctx: session.ctx, priority: PRIORITY.interactive });
   } catch (err) {
     // Stop must be idempotent: a device that was not moving may fault, and that
     // is not an error the operator needs to see.

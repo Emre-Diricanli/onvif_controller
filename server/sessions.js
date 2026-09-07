@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import { config } from './config.js';
 import { AppError } from './errors.js';
 import { attachEvents } from './onvif/events.js';
-import { stopMove, disarmMoveWatchdog } from './onvif/ptz.js';
+import { stopMove, disarmMoveWatchdog, movingProfiles } from './onvif/ptz.js';
 import { closeVendor } from './vendor/index.js';
 
 /** In-memory only. Credentials must never reach disk. */
@@ -113,8 +113,17 @@ export function destroySession(id) {
   // and any in-flight continuous move would otherwise run to a hard limit.
   disarmMoveWatchdog(session);
   if (session.ptz && session.cam) {
-    const profileToken = session.profiles?.[0]?.token;
-    if (profileToken) {
+    // Stop EVERY channel that was moving, not just the first profile. On a
+    // 32-channel recorder an operator moving channel 7 previously lost the
+    // watchdog while Stop went to channel 1 — leaving channel 7 panning with
+    // no backstop at all.
+    const moving = movingProfiles(session);
+    // Fall back to the first profile only when nothing was tracked, so a
+    // single-camera session behaves exactly as it always has.
+    const targets = moving.length > 0
+      ? moving
+      : [session.profiles?.[0]?.token].filter(Boolean);
+    for (const profileToken of targets) {
       // Fire and forget: the caller is tearing down and cannot await this, and
       // a camera that has already gone offline must not block the teardown.
       stopMove(session, { profileToken, panTilt: true, zoom: true }).catch(() => {});

@@ -616,6 +616,60 @@ async function containerPackagingChecks() {
   }
 }
 
+/**
+ * PTZ safety. Both of these are physical-risk bugs: a camera that keeps moving
+ * after Stop can run to a hard limit with nobody watching.
+ */
+async function ptzSafetyChecks() {
+  console.log('\nPTZ safety (stop invalidation and per-channel teardown)');
+  const ptz = await import('../server/onvif/ptz.js');
+
+  // A move already on the wire must not restart the camera when it lands.
+  const calls = [];
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const session = {
+    ptz: { nodeToken: 'n' }, inflight: new Map(), ctx: {}, profiles: [{ token: 'P1' }],
+    cam: {
+      continuousMove: (o, cb) => { calls.push(`move:${o.profileToken}`); gate.then(() => cb(null, {})); },
+      stop: (o, cb) => { calls.push(`stop:${o.profileToken}`); cb(null, {}); },
+    },
+  };
+  ptz.continuousMove(session, { profileToken: 'P7', pan: 0.5, tilt: 0, zoom: 0 });
+  await delay(10);
+  ptz.continuousMove(session, { profileToken: 'P7', pan: 0.8, tilt: 0, zoom: 0 });
+  await delay(10);
+  await ptz.stopMove(session, { profileToken: 'P7' });
+  release();
+  await delay(50);
+  check('a queued move never runs after Stop',
+    calls.lastIndexOf('stop:P7') > calls.lastIndexOf('move:P7'), calls.join(' -> '));
+
+  // Teardown must stop the channel that was actually moving.
+  const stops = [];
+  const nvr = {
+    ptz: {}, inflight: new Map(), ctx: {}, profiles: [{ token: 'P1' }, { token: 'P7' }],
+    cam: { continuousMove: (_o, cb) => cb(null, {}), stop: (o, cb) => { stops.push(o.profileToken); cb(null, {}); } },
+  };
+  await ptz.continuousMove(nvr, { profileToken: 'P7', pan: 0.5, tilt: 0, zoom: 0 });
+  check('the moving channel is tracked, not assumed to be the first',
+    ptz.movingProfiles(nvr).includes('P7'), JSON.stringify(ptz.movingProfiles(nvr)));
+  stops.length = 0;
+  for (const token of ptz.movingProfiles(nvr)) await ptz.stopMove(nvr, { profileToken: token });
+  check('teardown stops the channel that was moving', stops.includes('P7'), stops.join(',') || 'none');
+  check('teardown does not stop an idle channel', !stops.includes('P1'), stops.join(','));
+
+  // Watchdogs are per channel: arming one must not disarm another's guard.
+  const multi = {
+    ptz: {}, inflight: new Map(), ctx: {}, profiles: [{ token: 'A' }, { token: 'B' }],
+    cam: { continuousMove: (_o, cb) => cb(null, {}), stop: (_o, cb) => cb(null, {}) },
+  };
+  await ptz.continuousMove(multi, { profileToken: 'A', pan: 0.5, tilt: 0, zoom: 0 });
+  await ptz.continuousMove(multi, { profileToken: 'B', pan: 0.5, tilt: 0, zoom: 0 });
+  const armed = [...multi.inflight.values()].filter((v) => v.watchdog).length;
+  check('each moving channel keeps its own dead-man watchdog', armed === 2, `armed=${armed}`);
+}
+
 async function main() {
   await profileDescriptionChecks();
   await playbackProbeChecks();
@@ -631,6 +685,7 @@ async function main() {
   // covered. See GOVERNOR.md "The eight bug classes".
   const { bugClassChecks } = await import('./bugclass-tests.mjs');
   await bugClassChecks(check);
+  await ptzSafetyChecks();
   console.log('Starting mock camera and app server...');
   start('mock', ['tools/mock-camera.js', String(MOCK_PORT)]);
   start('app', ['server/index.js'], {
