@@ -1112,6 +1112,21 @@ async function main() {
         body: JSON.stringify({ streamId }),
       });
       check('stream/stop returns 204', stopRes.status === 204, `got ${stopRes.status}`);
+
+      // Ownership: a stream id from another session must not be stoppable, and
+      // the refusal must be indistinguishable from "no such stream" so the
+      // response cannot confirm that a foreign id is real.
+      const foreign = await fetch(`${BASE}/api/session/${id}/stream/stop`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ streamId: 'stream-owned-by-someone-else' }),
+      });
+      const missing = await fetch(`${BASE}/api/session/${id}/stream/stop`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ streamId: 'no-such-stream-at-all' }),
+      });
+      check('stopping an unowned stream is refused', foreign.status === 404, `got ${foreign.status}`);
+      check('an unowned stream is indistinguishable from a missing one',
+        foreign.status === missing.status, `unowned=${foreign.status} missing=${missing.status}`);
       await delay(1200);
       let alive = '';
       try {
