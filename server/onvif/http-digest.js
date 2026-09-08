@@ -3,6 +3,21 @@ import http from 'node:http';
 import https from 'node:https';
 import onvif from 'onvif';
 
+/*
+ * HTTP Digest (RFC 2617) transport for ONVIF, for recorders that answer with a
+ * `WWW-Authenticate: Digest` challenge instead of accepting the WS-Security
+ * UsernameToken the onvif library sends. Observed on a Lorex N864A6 (Dahua OEM).
+ *
+ * STATUS: the digest computation is verified against the RFC 2617 §3.5 reference
+ * vector. This module is NOT yet wired into the connect path — a first
+ * integration turned a clean UNAUTHORIZED into a timeout on the mock, and the
+ * one real device available for this rejects the given credentials for ONVIF
+ * entirely (its Dahua CGI accepts them; its ONVIF user list does not), so the
+ * end-to-end path cannot be verified against hardware yet. Kept as a ready
+ * building block; connect-path wiring needs a device that authenticates ONVIF
+ * over HTTP Digest to iterate against.
+ */
+
 const nonceCounts = new WeakMap();
 const md5 = (value) => createHash('md5').update(value, 'utf8').digest('hex');
 const quote = (value) => String(value).replace(/(["\\])/g, '\\$1');
