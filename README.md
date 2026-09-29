@@ -33,7 +33,8 @@ fails most often. Nothing else about the app changes.
 docker compose up
 ```
 
-Open http://127.0.0.1:8080.
+Open http://127.0.0.1:8080. If 8080 is taken, pick another host port with
+`HOST_PORT=8081 docker compose up` — it stays bound to `127.0.0.1`.
 
 **The published address is the security boundary.** The app has no
 authentication of its own, so `compose.yaml` publishes to `127.0.0.1` only:

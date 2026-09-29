@@ -7,8 +7,9 @@ services:
     # the port can pan cameras, rewrite network settings, and reboot recorders.
     # The loopback-only publish address below is the entire security boundary —
     # never widen it to "8080:8080" (that exposes camera control to the LAN).
+    # HOST_PORT only changes the host-side port; the address stays loopback.
     ports:
-      - '127.0.0.1:8080:8080'
+      - '127.0.0.1:${HOST_PORT:-8080}:8080'
     environment:
       # Inside a container 127.0.0.1 is the container's own loopback, so the app
       # must bind 0.0.0.0 to be reachable through the published port. This is
