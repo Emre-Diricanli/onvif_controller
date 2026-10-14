@@ -61,8 +61,20 @@ The image pins a known-good Node 20 and **ffmpeg**, which is the setup step that
 fails most often. Nothing else about the app changes.
 
 ```
-docker compose up
+npm run up          # or: ./docker/up.sh
 ```
+
+This builds the image, starts it in the background, waits for the healthcheck,
+and prints the address to open:
+
+```
+  ONVIF Controller is running — open http://127.0.0.1:8080
+```
+
+Plain `docker compose up -d --build` works too, but detached mode shows only
+Compose's own status, so the address is not printed. Use
+`docker compose logs --tail 3` to see it, or run `docker compose up --build`
+in the foreground, where it is the last startup line.
 
 Open http://127.0.0.1:8080. If 8080 is taken, pick another host port with
 `HOST_PORT=8081 docker compose up` — it stays bound to `127.0.0.1`.
