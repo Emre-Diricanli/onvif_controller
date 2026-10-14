@@ -207,7 +207,7 @@ export function renderConnect(root, { onConnected, prefillError = null }) {
   const card = el('div', 'connect-card');
 
   card.appendChild(el('h1', 'connect-title', 'ONVIF Controller'));
-  card.appendChild(el('p', 'connect-subtitle', 'Connect to a camera on this network.'));
+  card.appendChild(el('p', 'connect-subtitle', 'Connect to a camera or recorder on this network, over ONVIF or its own API.'));
 
   // --- Fields ---
   const fields = {};
@@ -266,6 +266,27 @@ export function renderConnect(root, { onConnected, prefillError = null }) {
 
   const hostPortRow = el('div', 'field-row');
   hostPortRow.append(hostField, portField);
+
+  // --- Protocol ---
+  // "Automatic" tries ONVIF, then asks the device in its own API (ISAPI, Dahua
+  // CGI, VAPIX, ...) — the common case on recorders shipped with ONVIF off.
+  const protocolField = el('div', 'field');
+  const protocolLabel = el('label', 'field-label', 'Protocol');
+  const protocolSelect = el('select', 'field-input');
+  protocolSelect.id = 'connect-protocol';
+  protocolLabel.htmlFor = protocolSelect.id;
+  const autoOption = el('option', null, 'Automatic (ONVIF, then vendor API)');
+  autoOption.value = 'auto';
+  protocolSelect.appendChild(autoOption);
+  protocolField.append(protocolLabel, protocolSelect);
+  api.listAdapters().then(({ adapters }) => {
+    if (destroyed) return;
+    for (const adapter of adapters) {
+      const option = el('option', null, adapter.label);
+      option.value = adapter.id;
+      protocolSelect.appendChild(option);
+    }
+  }).catch(() => { /* Automatic still works without the list */ });
   portField.style.flex = '0 0 6.5rem';
 
   // --- Remember toggle ---
@@ -407,7 +428,7 @@ export function renderConnect(root, { onConnected, prefillError = null }) {
 
     try {
       const session = await connectWithProgress(
-        { host, port, username, password },
+        { host, port, username, password, protocol: protocolSelect.value },
         ({ completed, total }) => {
           if (destroyed) return;
           stageTimers.forEach(clearTimeout);
@@ -508,6 +529,7 @@ export function renderConnect(root, { onConnected, prefillError = null }) {
 
   card.append(
     hostPortRow,
+    protocolField,
     userField,
     passField,
     rememberRow,

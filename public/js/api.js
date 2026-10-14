@@ -73,8 +73,15 @@ const q = (params) => {
 
 export const api = {
   // --- Session ---
-  connect: ({ host, port, username, password }) =>
-    post('/api/connect', { host, port, username, password }),
+  connect: ({ host, port, username, password, protocol = 'auto' }) =>
+    post('/api/connect', { host, port, username, password, protocol }),
+  listAdapters: () => get('/api/adapters'),
+
+  // --- Settings (protocol-neutral; ADAPTERS.md) ---
+  getTargets: (id) => get(`${s(id)}/targets`),
+  describeSettings: (id, target) => get(`${s(id)}/settings/describe${q({ target })}`),
+  readSettings: (id, target) => get(`${s(id)}/settings${q({ target })}`),
+  writeSettings: (id, target, values) => patch(`${s(id)}/settings`, { target, values }),
   getSession: (id) => get(s(id)),
   disconnect: (id) => post(`${s(id)}/disconnect`),
   discover: (timeoutMs = 5000) => post('/api/discover', { timeoutMs }),

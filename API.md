@@ -77,6 +77,28 @@ back to GetCapabilities on older firmware. `relayOutputs` is the count actually
 returned by GetRelayOutputs, not a capability flag — devices advertise deviceIO
 without relays and vice versa.
 
+`protocol` (optional, default `"auto"`) picks how to reach the device:
+
+- `"auto"`: ONVIF first. If ONVIF fails in a way that says nothing about the
+  device's own API (`UNAUTHORIZED`, `DEVICE_ERROR`, `UNSUPPORTED`,
+  `DEVICE_UNREACHABLE`, `CLOCK_SKEW`) and the host accepts TCP, every installed
+  vendor adapter is probed one at a time. The best match connects. If nothing
+  matches, the original ONVIF error is returned. If a vendor matched but refused
+  the credentials, that `UNAUTHORIZED` is returned instead, as the more
+  specific diagnosis.
+- `"onvif"`: ONVIF only. This is the pre-adapter behaviour.
+- `"<adapterId>"` (from `GET /api/adapters`): that vendor API only.
+
+Every session response carries `"protocol"`: `"onvif"` or the adapter id. A
+vendor-only session has empty `profiles`/`sources`, `ptz: null`, and every
+capability `false` except `settings: true`. Routes that need ONVIF (stream,
+snapshot, PTZ, imaging, encoder, device, network, playback) answer
+`501 UNSUPPORTED` for it. Use the Settings routes below.
+
+### `GET /api/adapters`
+→ `{ "adapters": [{ "id": "hikvision", "label": "Hikvision ISAPI", "defaultPorts": [80] }, …] }`
+in probe order. `onvif` is always present.
+
 ### `GET /api/session/:id`
 → the same payload as `/api/connect`, minus `sessionId`. Used to rehydrate the UI.
 → `404 SESSION_EXPIRED` when unknown or reaped.
@@ -302,6 +324,77 @@ entirely.
 Sets the device clock from the server clock. → `204`
 
 ---
+
+## Settings (protocol-neutral)
+
+The same four calls work on any session, whatever protocol reached the
+device. The contract behind them is ADAPTERS.md. Values use the device's
+native units and ranges, which the descriptors declare. Every response names
+the adapter (`source`) that produced it.
+
+### `GET /api/session/:id/targets`
+```json
+{ "protocol": "onvif", "targets": [
+  { "id": "source:VideoSource_1", "scope": "source", "label": "Channel 1", "channel": 1 },
+  { "id": "stream:Profile_1", "scope": "stream", "label": "Channel 1 · mainStream", "channel": 1, "parent": "source:VideoSource_1" }
+] }
+```
+`id` is opaque. Send it back verbatim. `scope` is one of
+`device | channel | source | stream`.
+
+### `GET /api/session/:id/settings/describe?target=<id>`
+```json
+{ "target": "source:VideoSource_1", "source": "onvif", "descriptors": [
+  { "key": "image.brightness", "label": "Brightness", "group": "imaging", "type": "number",
+    "unit": null, "min": 0, "max": 100, "step": 1, "writable": true, "resource": "imaging:VideoSource_1" },
+  { "key": "image.dayNight", "label": "Day/night (IR-cut)", "group": "imaging", "type": "enum",
+    "values": ["auto", "day", "night"], "unit": null, "writable": true, "resource": "imaging:VideoSource_1" }
+] }
+```
+Keys are canonical (ADAPTERS.md §4) or `vendor.<adapterId>.<name>`.
+
+### `GET /api/session/:id/settings?target=<id>[&keys=a,b]`
+→ `{ "target": "…", "values": { "image.brightness": 50, … }, "source": "onvif" }`
+
+### `PATCH /api/session/:id/settings`
+```json
+{ "target": "source:VideoSource_1", "values": { "image.brightness": 70, "image.dayNight": "night" } }
+```
+→ `200`
+```json
+{
+  "target": "source:VideoSource_1",
+  "source": "onvif",
+  "results": {
+    "image.brightness": { "outcome": "applied", "requested": 70, "observed": 70 },
+    "image.dayNight":   { "outcome": "unchanged", "requested": "night", "observed": "auto" }
+  },
+  "values": { "image.brightness": 70, "image.dayNight": "auto" }
+}
+```
+An unknown key, a read-only key, a wrong type, or an out-of-range value is
+`400 BAD_REQUEST` before anything is sent. `outcome` is one of:
+
+| outcome | meaning |
+| --- | --- |
+| `applied` | the read-back equals the requested value |
+| `adjusted` | the value changed, but to something else (clamped or quantized) |
+| `unchanged` | the device ignored the write |
+| `rejected` | the device explicitly refused that field |
+| `unknown` | the write was sent but could not be confirmed. Check before retrying |
+
+When an ONVIF write comes back with **every** field `unchanged` (the stub
+signature), and a vendor adapter answers on the same host
+(`VENDOR_HTTP_PORT`, default 80), the write is retried there once. That only
+happens on a single-source device whose vendor API exposes exactly one channel
+and every requested key. The response then carries
+`"source": "<adapterId>", "fallbackFrom": "onvif"`, and later calls for that
+target go to the vendor adapter. There is never a fallback after `unknown` or
+a transport error.
+
+For an ONVIF `stream:` target, the response also carries
+`streamRestartRequired` and `streamsRestarted`, with the same meaning as
+`PATCH /encoder`.
 
 ## WebSockets
 

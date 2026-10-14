@@ -1,0 +1,151 @@
+/* settings.css — the protocol-neutral settings panel and vendor-only screen. */
+
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.settings-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.settings-picker-label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-picker,
+.settings-select,
+.settings-number,
+.settings-text {
+  font: inherit;
+  font-size: var(--text-md);
+  color: var(--text);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  min-width: 0;
+}
+
+.settings-source {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.settings-group + .settings-group {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-4);
+}
+
+.settings-group-title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+}
+
+.settings-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.settings-row.is-readonly {
+  opacity: 0.6;
+}
+
+.settings-row-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.settings-label {
+  font-size: var(--text-md);
+  flex: 1;
+}
+
+.settings-value {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-slider {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.settings-outcome {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  padding: 0.125rem var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--surface-sunken);
+  color: var(--text-secondary);
+}
+
+.settings-outcome[data-outcome="applied"] { background: var(--success-fill); color: var(--success); }
+.settings-outcome[data-outcome="adjusted"] { background: var(--warning-fill); color: var(--warning); }
+.settings-outcome[data-outcome="unchanged"],
+.settings-outcome[data-outcome="rejected"] { background: var(--danger-fill); color: var(--danger); }
+.settings-outcome[data-outcome="unknown"] { background: var(--warning-fill); color: var(--warning); }
+
+.settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.vendor-device {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: var(--space-5) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.vendor-device-head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.vendor-device-title h1 {
+  margin: 0;
+  font-size: var(--text-xl);
+  letter-spacing: var(--tracking-heading);
+}
+
+.vendor-device-sub {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.vendor-device-panel {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-panel);
+  padding: var(--space-4);
+}

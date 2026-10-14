@@ -7,6 +7,7 @@
 
 import { renderConnect } from './views/connect.js';
 import { renderController } from './views/controller.js';
+import { renderVendorDevice } from './views/settings.js';
 
 const root = document.getElementById('app');
 
@@ -37,7 +38,10 @@ function showConnect(prefillError = null) {
 }
 
 function showController(session) {
-  mount(() => renderController(root, {
+  // A device reached only through its vendor API has no video or PTZ, so it
+  // gets the settings screen instead of the ONVIF controller.
+  const render = session.protocol && session.protocol !== 'onvif' ? renderVendorDevice : renderController;
+  mount(() => render(root, {
     session,
     onDisconnect(reason) {
       showConnect(reason || null);

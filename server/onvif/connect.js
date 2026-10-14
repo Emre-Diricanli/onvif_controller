@@ -115,7 +115,7 @@ export function assertSafeHost(host) {
  * return the pinned IP. Connecting to the resolved address rather than the name
  * closes the DNS-rebinding window between the check and the connect.
  */
-async function resolveSafeHost(host) {
+export async function resolveSafeHost(host) {
   const trimmed = assertSafeHost(host);
   if (net.isIP(trimmed)) return trimmed;
 

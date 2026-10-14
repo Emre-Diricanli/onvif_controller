@@ -5,6 +5,7 @@ import { AppError } from './errors.js';
 import { attachEvents } from './onvif/events.js';
 import { stopMove, disarmMoveWatchdog, movingProfiles } from './onvif/ptz.js';
 import { closeVendor } from './vendor/index.js';
+import { closeSettings } from './settings/service.js';
 
 /** In-memory only. Credentials must never reach disk. */
 const sessions = new Map();
@@ -42,6 +43,7 @@ export function createSession({ host, port, username, password, cam, device, cap
     sources,
     isMultiChannel,
     ptz,
+    protocol: 'onvif',
     ctx: { host, port },
     timeoutMs: config.onvifTimeoutMs,
     inflight: new Map(),
@@ -71,6 +73,63 @@ export function createSession({ host, port, username, password, cam, device, cap
   return session;
 }
 
+/**
+ * A session for a device reached through a vendor adapter alone (ADAPTERS.md):
+ * ONVIF is disabled or refuses these credentials, but the device's own API
+ * answers. It has no ONVIF client, no media profiles and no stream, only
+ * the settings surface. Every ONVIF-only route refuses it with a clear error
+ * rather than failing on a missing `cam`.
+ */
+export function createVendorSession({ host, port, username, password, connection, targets = [] }) {
+  const id = randomUUID();
+  const channels = targets.filter((t) => t.scope === 'channel' || t.scope === 'source');
+  const session = {
+    id,
+    host,
+    port,
+    username,
+    password,
+    protocol: connection.id,
+    connection,
+    cam: null,
+    device: {
+      manufacturer: connection.info?.vendor ?? null,
+      model: connection.info?.model ?? null,
+      firmware: connection.info?.firmware ?? null,
+      serial: connection.info?.serial ?? null,
+      hardwareId: null,
+    },
+    capabilities: {
+      ptz: false, imaging: false, events: false, relayOutputs: 0,
+      settings: true,
+    },
+    profiles: [],
+    profileMap: new Map(),
+    sources: [],
+    isMultiChannel: channels.length > 1,
+    ptz: null,
+    ctx: { host, port },
+    timeoutMs: config.onvifTimeoutMs,
+    inflight: new Map(),
+    events: new EventEmitter(),
+    eventsAttached: false,
+    createdAt: Date.now(),
+    lastSeenAt: Date.now(),
+    touch() { this.lastSeenAt = Date.now(); },
+  };
+  sessions.set(id, session);
+  return session;
+}
+
+/** Route helper for ONVIF-only features on a vendor-only session. */
+export function requireOnvif(session) {
+  if (!session.cam) {
+    throw new AppError('UNSUPPORTED', `This device is connected through ${session.connection?.label ?? 'a vendor API'}, not ONVIF.`,
+      'Live video, PTZ and events need ONVIF. Device settings are available under /settings.');
+  }
+  return session;
+}
+
 export function getSession(id) {
   const session = sessions.get(id);
   if (session) session.touch();
@@ -89,6 +148,7 @@ export function requireSession(id) {
 
 /** Resolve a profile token, defaulting to the first profile when omitted. */
 export function requireProfile(session, token) {
+  requireOnvif(session);
   if ((token === undefined || token === null) && session.isMultiChannel) {
     throw new AppError('BAD_REQUEST', 'A profile is required to select a channel on this multi-channel device.');
   }
@@ -131,6 +191,7 @@ export function destroySession(id) {
   }
   // A vendor driver may hold a socket and a session heartbeat timer.
   try { closeVendor(session); } catch { /* already gone */ }
+  try { closeSettings(session); } catch { /* already gone */ }
   try { session.events?.detach?.(); } catch { /* ignore */ }
   try { session.cam?.removeAllListeners?.(); } catch { /* ignore */ }
 
@@ -144,8 +205,9 @@ export function destroySession(id) {
 export function serializeSession(session, { includeId = false } = {}) {
   return {
     ...(includeId ? { sessionId: session.id } : {}),
+    protocol: session.protocol ?? 'onvif',
     device: session.device,
-    capabilities: session.capabilities,
+    capabilities: { ...session.capabilities, settings: true },
     profiles: session.profiles,
     sources: session.sources,
     isMultiChannel: session.isMultiChannel,

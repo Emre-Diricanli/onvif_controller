@@ -13,6 +13,7 @@ import ptzRoutes from './routes/ptz.js';
 import imagingRoutes from './routes/imaging.js';
 import deviceRoutes from './routes/device.js';
 import playbackRoutes from './routes/playback.js';
+import settingsRoutes from './routes/settings.js';
 import fanoutRoutes from './routes/fanout.js';
 import { attachFanout } from './fanout/index.js';
 import { getTargets, ensureTargetsLoaded, targetLoadErrors, attachSnapshot } from './fanout/config.js';
@@ -64,6 +65,20 @@ app.get('/api/health', (_req, res) => {
 app.use('/api', fanoutRoutes);
 app.use('/api', sessionRoutes);
 app.use('/api/session/:id', mediaRoutes);
+// A vendor-only session (ADAPTERS.md) has no ONVIF client. Refuse the
+// ONVIF-only surfaces up front with a clear envelope instead of letting each
+// handler trip over a missing `cam`.
+const VENDOR_SAFE = new Set(['disconnect', 'settings', 'targets']);
+app.use('/api/session/:id/:feature', (req, _res, next) => {
+  const session = getSession(req.params.id);
+  if (session && !session.cam && !VENDOR_SAFE.has(req.params.feature)) {
+    next(new AppError('UNSUPPORTED', `This device is connected through ${session.connection?.label ?? 'a vendor API'}, not ONVIF.`,
+      'Live video, PTZ and events need ONVIF. Use the device settings panel instead.'));
+    return;
+  }
+  next();
+});
+app.use('/api/session/:id', settingsRoutes);
 app.use('/api/session/:id/ptz', ptzRoutes);
 app.use('/api/session/:id/imaging', imagingRoutes);
 app.use('/api/session/:id/device', deviceRoutes);

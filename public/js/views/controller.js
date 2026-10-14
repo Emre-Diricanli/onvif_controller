@@ -31,6 +31,7 @@ import { renderNetwork } from './network.js';
 import { renderEncoder } from './encoder.js';
 import { renderPlayback } from './playback.js';
 import { renderFanout } from './fanout.js';
+import { renderSettings } from './settings.js';
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -747,6 +748,14 @@ export function renderController(root, { session, onDisconnect }) {
       // whenever the operator configured targets, on any device.
       available: () => true,
       build: (c) => renderFanout(c, { onError: showError }),
+    },
+    {
+      name: 'All settings',
+      scope: 'device',
+      // The protocol-neutral surface: every target the device declares, in
+      // its own units, with per-field outcomes. Works on any adapter.
+      available: () => true,
+      build: (c) => renderSettings(c, { sessionId: session.sessionId, onError: showError }),
     },
     {
       name: 'Device',
