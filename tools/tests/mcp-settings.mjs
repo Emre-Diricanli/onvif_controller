@@ -147,7 +147,10 @@ try {
 
   t.section('get_snapshot');
   const viaMock = await h.call('get_snapshot', { device: DEV });
-  t.check('a camera without a working snapshot gives a clean error', viaMock.isError === true && !/admin/.test(textOf(viaMock)), textOf(viaMock));
+  // The mock serves a real JPEG at its advertised snapshot URI (tools/mock-camera.js).
+  const mockImg = viaMock.content?.find((b) => b.type === 'image');
+  t.check('mock-cam snapshot arrives as an image block', !viaMock.isError && mockImg?.mimeType === 'image/jpeg' && mockImg.data.length > 1000, textOf(viaMock));
+  t.check('snapshot text never echoes credentials', !/admin:|password/i.test(textOf(viaMock)));
   proxy = await startSnapshotProxy(h.mockPort);
   const { ref: snapCam } = await h.ctx.sessions.connect({ host: '127.0.0.1', port: proxy.port, username: 'admin', password: 'admin' });
   const snap = await h.call('get_snapshot', { device: snapCam });
