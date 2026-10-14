@@ -1,6 +1,12 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { AppError } from '../errors.js';
 
+const SNAPSHOT_TIMEOUT_MS = 3_000;
+const SNAPSHOT_CACHE_MS = 300;
+/* Weak session keys allow disconnect/expiry to release cached JPEGs. All
+ * viewers of a profile share one bounded fetch, including the Digest retry. */
+const snapshots = new WeakMap();
+
 function parseDigestChallenge(header) {
   if (!header || !/^Digest\s/i.test(header)) return null;
   const params = {};
@@ -48,13 +54,13 @@ async function request(url, options) {
     return await fetch(url, { ...options, redirect: 'follow' });
   } catch (error) {
     if (error.name === 'TimeoutError' || error.name === 'AbortError') {
-      throw new AppError('DEVICE_TIMEOUT', 'The camera did not return a snapshot within 10 seconds.', null, 504);
+      throw new AppError('DEVICE_TIMEOUT', 'The camera did not return a snapshot within 3 seconds.', null, 504);
     }
     throw new AppError('DEVICE_UNREACHABLE', 'The camera snapshot endpoint could not be reached.', null, 502);
   }
 }
 
-export async function fetchSnapshot(session, profileToken) {
+async function loadSnapshot(session, profileToken) {
   const profile = session.profileMap.get(profileToken);
   if (!profile?.snapshotUri) throw new AppError('UNSUPPORTED', 'This media profile does not provide snapshots.', null, 404);
   let url;
@@ -66,21 +72,55 @@ export async function fetchSnapshot(session, profileToken) {
   }
   url.username = '';
   url.password = '';
-  const signal = AbortSignal.timeout(10_000);
+  const signal = AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS);
   let response = await request(url, { signal });
   if (response.status === 401) {
     const challenge = parseDigestChallenge(response.headers.get('www-authenticate'));
+    await response.body?.cancel();
     if (!challenge) throw new AppError('UNAUTHORIZED', 'The camera rejected snapshot authentication.', null, 401);
     const challengedUrl = new URL(response.url || url);
     const authorization = digestAuthorization(challengedUrl, session.username, session.password, challenge);
     response = await request(challengedUrl, { signal, headers: { Authorization: authorization } });
   }
   if (response.status === 401 || response.status === 403) {
+    await response.body?.cancel();
     throw new AppError('UNAUTHORIZED', 'The camera rejected snapshot authentication.', null, 401);
   }
-  if (!response.ok) throw new AppError('DEVICE_ERROR', `The camera snapshot request failed with HTTP ${response.status}.`, null, 502);
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new AppError('DEVICE_ERROR', `The camera snapshot request failed with HTTP ${response.status}.`, null, 502);
+  }
   const contentType = response.headers.get('content-type')?.split(';', 1)[0] || 'image/jpeg';
-  const body = Buffer.from(await response.arrayBuffer());
+  let body;
+  try {
+    body = Buffer.from(await response.arrayBuffer());
+  } catch {
+    if (signal.aborted) throw new AppError('DEVICE_TIMEOUT', 'The camera did not return a snapshot within 3 seconds.', null, 504);
+    throw new AppError('DEVICE_UNREACHABLE', 'The camera snapshot response was interrupted.', null, 502);
+  }
   if (!body.length) throw new AppError('DEVICE_ERROR', 'The camera returned an empty snapshot.', null, 502);
   return { contentType, body };
+}
+
+export async function fetchSnapshot(session, profileToken) {
+  let profiles = snapshots.get(session);
+  if (!profiles) {
+    profiles = new Map();
+    snapshots.set(session, profiles);
+  }
+  const uri = session.profileMap.get(profileToken)?.snapshotUri;
+  let entry = profiles.get(profileToken);
+  if (!entry || entry.uri !== uri) {
+    entry = { uri, pending: null, value: null, expiresAt: 0 };
+    profiles.set(profileToken, entry);
+  }
+  if (entry.pending) return entry.pending;
+  if (entry.value && Date.now() < entry.expiresAt) return entry.value;
+  entry.value = null;
+  entry.pending = loadSnapshot(session, profileToken).then((value) => {
+    entry.value = value;
+    entry.expiresAt = Date.now() + SNAPSHOT_CACHE_MS;
+    return value;
+  }).finally(() => { entry.pending = null; });
+  return entry.pending;
 }

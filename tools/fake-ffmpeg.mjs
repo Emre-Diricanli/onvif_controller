@@ -16,6 +16,45 @@
  */
 import { spawn } from 'node:child_process';
 
+/* Fault modes stay inside this process so SIGKILL leaves no helper behind.
+ * The default remains a real synthetic encode for the smoke suite. */
+const mode = process.env.FAKE_FFMPEG_MODE;
+if (mode === 'crash') {
+  process.stderr.write('Unable to open rtsp://fixture-user:fixture-password@camera/live\n');
+  process.exit(1);
+}
+if (mode === 'slowinit') {
+  setInterval(() => {}, 1000);
+  await new Promise(() => {});
+}
+if (mode === 'fixture') {
+  const box = (type, ...parts) => {
+    const body = Buffer.concat(parts);
+    const header = Buffer.alloc(8);
+    header.writeUInt32BE(body.length + 8);
+    header.write(type, 4);
+    return Buffer.concat([header, body]);
+  };
+  const words = (...values) => {
+    const buffer = Buffer.alloc(values.length * 4);
+    values.forEach((value, index) => buffer.writeUInt32BE(value, index * 4));
+    return buffer;
+  };
+  process.stdout.write(Buffer.concat([box('ftyp', Buffer.from('isom0000')),
+    box('moov', box('mvex', box('trex', words(0, 1, 1, 1, 1, 0x1010000))))]));
+  let sequence = 0;
+  setInterval(() => {
+    const keyframe = sequence++ % 5 === 0;
+    process.stdout.write(Buffer.concat([
+      box('moof', box('traf', box('tfhd', words(0x20020, 1, 0x1010000)),
+        box('trun', words(4, 1, keyframe ? 0x2000000 : 0x1010000)))),
+      box('mdat', words(sequence)),
+    ]));
+  }, 40);
+  await new Promise(() => {});
+}
+
+
 const SOURCE = process.env.FAKE_FFMPEG_SOURCE
   ?? 'testsrc2=size=320x180:rate=10';
 const REAL = process.env.FAKE_FFMPEG_REAL ?? '/opt/homebrew/bin/ffmpeg';
@@ -26,7 +65,7 @@ const out = [];
 for (let i = 0; i < argv.length; i++) {
   const arg = argv[i];
 
-  if (arg === '-rtsp_transport') { i += 1; continue; }      // no RTSP here
+  if (arg === '-rtsp_transport' || arg === '-timeout') { i += 1; continue; }      // no RTSP here
   if (arg === '-i') {
     out.push('-f', 'lavfi', '-i', SOURCE);
     i += 1;                                                  // drop the URL
