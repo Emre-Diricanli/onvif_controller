@@ -1,9 +1,47 @@
 /**
  * ControllerClient: the controller's REST API (API.md) as methods (MCP.md §5).
  *
- * Step-0 reference implementation. The interface is frozen; Stream 2 owns
- * hardening (retries on connection reset, response size bounds, TLS options).
+ * Responses are bounded, deadlines include body reads, and failures never retry
+ * a request: a write may already have reached the camera.
  */
+
+import { validateConfig } from './config.js';
+import { scrub } from './kit.js';
+
+export const MAX_JSON_BYTES = 5 * 1024 * 1024;
+export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+
+/** Preserve ONVIF resource tokens, but remove credentials and URL userinfo. */
+function safeValue(value) {
+  if (typeof value === 'string') {
+    return value.replace(/(rtsps?|https?):\/\/[^\s/@]*@/gi, '$1://***@')
+      .replace(/([?&](?:token|password|access_token|auth)=)[^&#\s]*/gi, '$1***');
+  }
+  if (Array.isArray(value)) return value.map(safeValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, v]) => [key,
+      /^(password|passwd|pwd|authorization|access_token|refresh_token)$/i.test(key) ? '***' : safeValue(v)]));
+  }
+  return value;
+}
+
+async function readBounded(res, limit) {
+  const tooLarge = () => new ControllerError('CONTROLLER_RESPONSE_TOO_LARGE', 'Controller response exceeded the size limit.', null, res.status);
+  if (Number(res.headers.get('content-length')) > limit) {
+    await res.body?.cancel();
+    throw tooLarge();
+  }
+  const chunks = [];
+  let size = 0;
+  if (res.body) {
+    for await (const chunk of res.body) {
+      size += chunk.byteLength;
+      if (size > limit) throw tooLarge();
+      chunks.push(Buffer.from(chunk));
+    }
+  }
+  return Buffer.concat(chunks, size);
+}
 
 export class ControllerError extends Error {
   constructor(code, message, hint = null, status = 0) {
@@ -24,8 +62,10 @@ const qs = (params) => {
 };
 
 export class ControllerClient {
+  #passwords = new Set();
+
   constructor({ name, url, token = null, timeoutMs = 30_000 }) {
-    if (!url) throw new Error(`Controller "${name}" has no url`);
+    validateConfig({ controllers: [{ name, url, token, timeoutMs }] }, { resolveEnvironment: false });
     this.name = name;
     this.base = String(url).replace(/\/+$/, '');
     this.token = token;
@@ -36,30 +76,45 @@ export class ControllerClient {
     const headers = {};
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
-    let res;
+    const signal = AbortSignal.timeout(timeoutMs ?? this.timeoutMs);
     try {
-      res = await fetch(`${this.base}${path}`, {
-        method,
-        headers,
+      const res = await fetch(`${this.base}${path}`, {
+        method, headers, redirect: 'manual',
         body: body !== undefined ? JSON.stringify(body) : undefined,
-        signal: AbortSignal.timeout(timeoutMs ?? this.timeoutMs),
+        signal,
       });
+      if (res.status === 401) {
+        await res.body?.cancel();
+        throw new ControllerError('CONTROLLER_UNAUTHORIZED', 'Controller authentication failed.',
+          'Check the controller token in MCP config matches CONTROLLER_TOKEN on the controller.', 401);
+      }
+      if (res.status === 204) return null;
+      const buffer = await readBounded(res, binary && res.ok ? MAX_IMAGE_BYTES : MAX_JSON_BYTES);
+      if (binary && res.ok) return { buffer, contentType: res.headers.get('content-type') ?? 'application/octet-stream' };
+      let envelope;
+      try { envelope = buffer.length ? JSON.parse(buffer.toString('utf8')) : null; } catch {
+        throw new ControllerError('CONTROLLER_INVALID_RESPONSE', 'Controller returned invalid JSON.', null, res.status);
+      }
+      if (!res.ok) {
+        const e = envelope?.error ?? {};
+        /** Do not trust upstream diagnostics to keep bearer or camera secrets private. */
+        const sensitive = [this.token, ...this.#passwords, body?.password, body?.username].filter(Boolean);
+        const safe = (value, fallback) => {
+          if (typeof value !== 'string' || sensitive.some((secret) => value.includes(secret))) return fallback;
+          return scrub(value);
+        };
+        const code = typeof e.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(e.code)
+          && !sensitive.includes(e.code) ? e.code : `HTTP_${res.status}`;
+        throw new ControllerError(code, safe(e.message, `Controller answered HTTP ${res.status}.`), safe(e.hint, null), res.status);
+      }
+      return safeValue(envelope);
     } catch (err) {
-      const timedOut = err?.name === 'TimeoutError';
+      if (err instanceof ControllerError) throw err;
+      const timedOut = signal.aborted || err?.name === 'TimeoutError';
       throw new ControllerError(timedOut ? 'CONTROLLER_TIMEOUT' : 'CONTROLLER_UNREACHABLE',
-        `Controller "${this.name}" ${timedOut ? 'did not answer in time' : 'could not be reached'}.`,
-        `Check that it is running and reachable at ${this.base}.`);
+        timedOut ? 'Controller did not answer in time.' : 'Controller could not be reached.',
+        'Check that the controller is running and reachable.');
     }
-    if (res.status === 204) return null;
-    if (!res.ok) {
-      let envelope = null;
-      try { envelope = await res.json(); } catch { /* not JSON */ }
-      const e = envelope?.error ?? {};
-      throw new ControllerError(e.code ?? `HTTP_${res.status}`, e.message ?? `Controller answered HTTP ${res.status}.`, e.hint ?? null, res.status);
-    }
-    if (binary) return { buffer: Buffer.from(await res.arrayBuffer()), contentType: res.headers.get('content-type') ?? 'application/octet-stream' };
-    const textBody = await res.text();
-    return textBody ? JSON.parse(textBody) : null;
   }
 
   s(id) { return `/api/session/${enc(id)}`; }
@@ -68,6 +123,7 @@ export class ControllerClient {
   adapters() { return this.request('GET', '/api/adapters'); }
   discover(timeoutMs = 5000) { return this.request('POST', '/api/discover', { timeoutMs }, { timeoutMs: timeoutMs + 10_000 }); }
   connect({ host, port = 80, username, password, protocol = 'auto' }) {
+    if (password) this.#passwords.add(password);
     return this.request('POST', '/api/connect', { host, port, username, password, protocol }, { timeoutMs: 90_000 });
   }
   session(id) { return this.request('GET', this.s(id)); }

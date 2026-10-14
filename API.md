@@ -7,6 +7,41 @@ genuinely required, change it here first and say so loudly in the branch summary
 Base URL: `http://localhost:8080`
 All request and response bodies are JSON unless stated otherwise.
 
+## Authentication
+
+Authentication is opt-in. With `CONTROLLER_TOKEN` unset or empty, existing
+HTTP and WebSocket behavior is unchanged. When set, every `/api/**` request
+except `GET /api/health` (and `HEAD`), and every `/ws/**` upgrade, requires either
+`Authorization: Bearer <token>` or a valid browser authentication cookie.
+Bearer values are compared using constant-time comparison for equal-length
+buffers. Failed API requests and upgrades return HTTP 401 with the normal
+error envelope, code `UNAUTHORIZED`; they never echo supplied credentials.
+
+For browser access, visit `/?token=<token>` once (any static path also works).
+A correct token sets a session cookie with `HttpOnly`, `SameSite=Strict`, and
+`Path=/`, then redirects with HTTP 302 to the same path and other query
+parameters, removing all `token` parameters. The cookie contains an HMAC,
+not the bearer token, and becomes invalid when the controller restarts.
+Invalid login tokens return a 401 page. Static assets remain public. Existing
+same-origin checks still apply to authenticated requests and WebSockets.
+Avoid sharing login links or recording their query strings in proxy logs.
+
+For remote access, prefer an SSH tunnel to the loopback listener, or set
+`CONTROLLER_TOKEN` and terminate HTTPS at a reverse proxy with a trusted
+certificate. MCP uses normal TLS verification; it does not offer
+`insecureTls`. Configure the proxy to redact login query strings and add
+`Secure` to the authentication cookie when terminating HTTPS (direct HTTPS
+requests already set it). Token authentication alone does not encrypt traffic.
+The controller warns when bound beyond loopback without a token.
+
+MCP controller configuration supports optional `allowHosts: ["192.168.1.0/24",
+"camera.example", "2001:db8::/32"]`. It restricts ad-hoc connections only;
+configured devices remain explicitly trusted. Hostnames match exact names
+(case-insensitively), and CIDRs match literal IPv4/IPv6 addresses. MCP does
+not resolve DNS locally to authorize a hostname against a CIDR, because a
+remote controller may resolve names differently. An empty list denies all
+ad-hoc connections; omission leaves them unrestricted.
+
 ## Error envelope
 
 Every non-2xx response uses this shape, with no exceptions:
