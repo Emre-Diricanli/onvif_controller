@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import net from 'node:net';
 import { AppError, toResponse } from '../errors.js';
 import { connectDevice, discoverDevices, resolveSafeHost } from '../onvif/connect.js';
 import { createSession, createVendorSession, requireSession, destroySession, serializeSession } from '../sessions.js';
@@ -12,27 +11,12 @@ import { listAdapters, getAdapter, probeAll } from '../adapters/index.js';
  */
 const VENDOR_RETRY_CODES = new Set(['UNAUTHORIZED', 'DEVICE_ERROR', 'UNSUPPORTED', 'DEVICE_UNREACHABLE', 'CLOCK_SKEW']);
 
-/**
- * One TCP connect, no payload. An unreachable host must fail in about a
- * second, not after every vendor probe has timed out in turn.
- */
-function tcpReachable(host, port, timeoutMs = 1500) {
-  return new Promise((resolve) => {
-    const socket = net.connect({ host, port });
-    const done = (ok) => { socket.destroy(); resolve(ok); };
-    socket.setTimeout(timeoutMs, () => done(false));
-    socket.once('connect', () => done(true));
-    socket.once('error', () => done(false));
-  });
-}
-
 async function connectVendor({ host: requestedHost, port, username, password, only = null, sendProgress }) {
   // Same SSRF guard and DNS pinning as the ONVIF path: this app makes
   // requests on the operator's behalf, whatever protocol it speaks.
   const host = await resolveSafeHost(requestedHost);
   sendProgress?.({ stage: 'vendor-probe', message: 'Asking the device in its own API' });
   const cfg = { host, port, username, password, timeoutMs: 4000 };
-  if (!(await tcpReachable(host, port))) return null;
   const probes = await probeAll(cfg, { only, useCache: false });
   const match = probes.filter((p) => p.match && p.id !== 'onvif').sort((a, b) => b.confidence - a.confidence)[0];
   if (!match) return null;

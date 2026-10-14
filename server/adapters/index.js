@@ -7,6 +7,7 @@
  * probe at once.
  */
 import { readdirSync, existsSync } from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -44,6 +45,23 @@ export async function getAdapter(id) {
 }
 
 /**
+ * One TCP connect, no payload. Probing a port nobody listens on would cost
+ * one connection-refused per adapter, and the governor rightly counts those
+ * as transport failures: six adapters are enough to open the HOST's breaker
+ * and lock out a working ONVIF session to the same camera for 30s. So a dead
+ * port is detected once, here, and never probed.
+ */
+export function tcpReachable(host, port, timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host, port });
+    const done = (ok) => { socket.destroy(); resolve(ok); };
+    socket.setTimeout(timeoutMs, () => done(false));
+    socket.once('connect', () => done(true));
+    socket.once('error', () => done(false));
+  });
+}
+
+/**
  * Probe adapters serially against one device. Never throws: a probe failure
  * is a non-match. `only` restricts to a list of adapter ids.
  */
@@ -51,9 +69,14 @@ export async function probeAll(config, { only = null, useCache = true } = {}) {
   const key = `${config.host}:${config.port ?? ''}|${only ? only.join(',') : '*'}`;
   const hit = probeCache.get(key);
   if (useCache && hit && Date.now() - hit.at < PROBE_CACHE_MS) return hit.results;
+  const adapters = (await loadAdapters()).filter((a) => !only || only.includes(a.id));
   const results = [];
-  for (const adapter of await loadAdapters()) {
-    if (only && !only.includes(adapter.id)) continue;
+  if (!(await tcpReachable(config.host, config.port ?? 80, Math.min(config.timeoutMs ?? 1500, 1500)))) {
+    for (const adapter of adapters) results.push({ id: adapter.id, match: false, confidence: 0, unreachable: true });
+    probeCache.set(key, { at: Date.now(), results });
+    return results;
+  }
+  for (const adapter of adapters) {
     let result = { match: false, confidence: 0 };
     try {
       result = (await adapter.probe(config)) ?? result;

@@ -118,6 +118,14 @@ const stubSid = stubConn.json?.sessionId;
 const stubSource = (await api(base, 'GET', `/api/session/${stubSid}/targets`)).json?.targets?.find((x) => x.scope === 'source');
 const stubWrite = await api(base, 'PATCH', `/api/session/${stubSid}/settings`, { target: stubSource?.id, values: { 'image.brightness': 61 } });
 t.check('ignored ONVIF write is "unchanged", never "applied"', stubWrite.json?.results?.['image.brightness']?.outcome === 'unchanged', JSON.stringify(stubWrite.json));
+// The stub triggers a fallback probe on the vendor port, where nothing listens
+// here. That must not spend the host's failure budget: six refused probes
+// once opened the governor breaker and locked out this very ONVIF session.
+for (let i = 0; i < 2; i += 1) {
+  await api(base, 'PATCH', `/api/session/${stubSid}/settings`, { target: stubSource?.id, values: { 'image.brightness': 62 + i } });
+}
+const stillUp = await api(base, 'GET', `/api/session/${stubSid}/settings?target=${encodeURIComponent(stubSource?.id)}`);
+t.check('a dead vendor port does not trip the host breaker (ONVIF still answers)', stillUp.status === 200, JSON.stringify(stillUp.json).slice(0, 200));
 
 // ------------------------------------------------------------- vendor-only
 t.section('vendor-only devices');
