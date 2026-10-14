@@ -5,6 +5,37 @@ low-latency live stream plus PTZ, presets, imaging, events, and device control.
 
 Built for Hikvision cameras and NVRs, and works with any ONVIF Profile S device.
 
+## Device settings over any protocol
+
+ONVIF is one way in, not the only one. The **All settings** panel, and the
+`/api/session/:id/settings` API behind it, read and change camera and recorder
+settings through whichever API the device actually answers:
+
+| Adapter | Protocol | Verification |
+| --- | --- | --- |
+| `onvif` | ONVIF Imaging + Media | device-verified (existing paths) |
+| `hikvision` | Hikvision ISAPI | mock-verified |
+| `dahua` | Dahua HTTP API (CGI), including Lorex OEM recorders | mock-verified |
+| `axis` | Axis VAPIX | mock-verified |
+| `reolink` | Reolink JSON CGI | mock-verified |
+| `uniview` | Uniview LiteAPI | mock-verified |
+
+**Protocol → Automatic** on the Connect screen tries ONVIF first. If ONVIF is
+off or refuses the credentials, it asks the device in its own API. This is
+the usual case on recorders that ship with ONVIF disabled. A device reached
+that way gets a settings-only screen, because live video and PTZ still need
+ONVIF.
+
+Every write is read back and reported per field as one of `applied`,
+`adjusted`, `unchanged`, `rejected` or `unknown`. The app never reports a
+change as done just because the device said "OK".
+
+"Mock-verified" means the adapter passes its conformance suite against a
+persona built from the vendor's documented API. It has not yet been confirmed
+on hardware. `node tools/probe-dahua.mjs` and `tools/probe-isapi.mjs` are
+read-only tools for checking a real unit. To add a vendor, see
+`ADAPTERS.md`.
+
 ## Requirements
 
 - Node.js 20 or newer
@@ -177,4 +208,5 @@ real cases this app now handles explicitly rather than failing confusingly:
 
 - `SPEC.md` — product and design contract, including the motion system
 - `API.md` — the HTTP and WebSocket wire protocol
+- `ADAPTERS.md` — the device-adapter contract: settings model, verified writes, transport rules
 - `INTERNAL.md` — module boundaries and import signatures
