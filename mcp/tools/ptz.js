@@ -9,43 +9,13 @@
  * agent has no joystick to release).
  */
 import { z } from 'zod';
+import { resolveProfile } from '../lib/profiles.js';
 import { defineTool, result, json, ToolError } from '../lib/kit.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/**
- * Resolve the media profile a PTZ call acts on.
- *
- * A profile token is not a channel (ADAPTERS.md §2), so on a multi-channel
- * recorder we refuse to guess: the caller must name a profile, or a 1-based
- * channel which we map to that channel's first profile from the session's
- * sources. A single-channel device defaults to its first profile.
- */
-function resolveProfile(session, { profile, channel }) {
-  if (typeof profile === 'string' && profile.trim()) return profile.trim();
-  const sources = Array.isArray(session?.sources) ? session.sources : [];
-  const profiles = Array.isArray(session?.profiles) ? session.profiles : [];
-
-  if (channel !== undefined && channel !== null) {
-    const idx = Number(channel) - 1;
-    if (!Number.isInteger(idx) || idx < 0 || idx >= sources.length) {
-      throw new ToolError('BAD_REQUEST', `No channel ${channel} on this device (it reports ${sources.length}).`,
-        'Pass a valid 1-based channel, or a profile token from device_info.');
-    }
-    const token = sources[idx]?.profiles?.[0]?.token;
-    if (!token) {
-      throw new ToolError('BAD_REQUEST', `Channel ${channel} exposes no media profile.`,
-        'Pick a profile token from device_info instead.');
-    }
-    return token;
-  }
-
-  if (!session?.isMultiChannel && profiles[0]?.token) return profiles[0].token;
-  if (sources.length === 1 && sources[0]?.profiles?.[0]?.token) return sources[0].profiles[0].token;
-  throw new ToolError('BAD_REQUEST',
-    'This device has multiple channels, so a PTZ call needs `profile` (a token from device_info) or `channel` (1-based).',
-    'Call device_info to list channels and their profile tokens.');
-}
+/** PTZ never guesses which camera on a recorder to move (lib/profiles.js). */
+const resolvePtzProfile = (session, args) => resolveProfile(session, args).token;
 
 /** Refuse PTZ on a vendor-only session or a device with no movable node. */
 function requirePtz(entry) {
@@ -97,7 +67,7 @@ export const tools = [
     async handler({ device, profile, channel, pan, tilt, zoom, duration_ms: durationMs }, ctx) {
       return ctx.sessions.use(device, async (client, sid, entry) => {
         requirePtz(entry);
-        const resolved = resolveProfile(entry.session, { profile, channel });
+        const resolved = resolvePtzProfile(entry.session, { profile, channel });
         const vector = { pan: pan ?? 0, tilt: tilt ?? 0, zoom: zoom ?? 0 };
         let moveError = null;
         try {
@@ -136,7 +106,7 @@ export const tools = [
     async handler({ device, profile, channel, panTilt, zoom }, ctx) {
       return ctx.sessions.use(device, async (client, sid, entry) => {
         requirePtz(entry);
-        const resolved = resolveProfile(entry.session, { profile, channel });
+        const resolved = resolvePtzProfile(entry.session, { profile, channel });
         await client.ptzStop(sid, { profile: resolved, panTilt: panTilt ?? true, zoom: zoom ?? true });
         return result(json({ device, profile: resolved, stopped: true, panTilt: panTilt ?? true, zoom: zoom ?? true }));
       });
@@ -155,7 +125,7 @@ export const tools = [
     async handler({ device, profile, channel }, ctx) {
       return ctx.sessions.use(device, async (client, sid, entry) => {
         requirePtz(entry);
-        const resolved = resolveProfile(entry.session, { profile, channel });
+        const resolved = resolvePtzProfile(entry.session, { profile, channel });
         const status = await client.ptzStatus(sid, resolved);
         return result(json({ device, profile: resolved, ...(status ?? {}) }));
       });
@@ -179,7 +149,7 @@ export const tools = [
     async handler({ device, profile, channel, action }, ctx) {
       return ctx.sessions.use(device, async (client, sid, entry) => {
         requirePtz(entry);
-        const resolved = resolveProfile(entry.session, { profile, channel });
+        const resolved = resolvePtzProfile(entry.session, { profile, channel });
         const act = action ?? 'goto';
         await client.ptzHome(sid, { profile: resolved, action: act });
         return result(json({ device, profile: resolved, action: act, ok: true }));
@@ -198,7 +168,7 @@ export const tools = [
     async handler({ device, profile, channel }, ctx) {
       return ctx.sessions.use(device, async (client, sid, entry) => {
         requirePtz(entry);
-        const resolved = resolveProfile(entry.session, { profile, channel });
+        const resolved = resolvePtzProfile(entry.session, { profile, channel });
         const found = await client.ptzPresets(sid, resolved);
         const presets = Array.isArray(found?.presets) ? found.presets : [];
         return result(json({ device, profile: resolved, count: presets.length, presets }));
@@ -223,7 +193,7 @@ export const tools = [
     async handler({ device, profile, channel, token, name, speed }, ctx) {
       return ctx.sessions.use(device, async (client, sid, entry) => {
         requirePtz(entry);
-        const resolved = resolveProfile(entry.session, { profile, channel });
+        const resolved = resolvePtzProfile(entry.session, { profile, channel });
         let presetToken = typeof token === 'string' && token.trim() ? token.trim() : null;
         let matchedName = null;
         if (!presetToken) {
@@ -265,7 +235,7 @@ export const tools = [
     async handler({ device, profile, channel, name, token }, ctx) {
       return ctx.sessions.use(device, async (client, sid, entry) => {
         requirePtz(entry);
-        const resolved = resolveProfile(entry.session, { profile, channel });
+        const resolved = resolvePtzProfile(entry.session, { profile, channel });
         const saved = await client.ptzSavePreset(sid, { profile: resolved, name, token });
         return result(json({ device, profile: resolved, token: saved?.token ?? token ?? null, name: saved?.name ?? name, saved: true }));
       });
@@ -287,7 +257,7 @@ export const tools = [
     async handler({ device, profile, channel, token }, ctx) {
       return ctx.sessions.use(device, async (client, sid, entry) => {
         requirePtz(entry);
-        const resolved = resolveProfile(entry.session, { profile, channel });
+        const resolved = resolvePtzProfile(entry.session, { profile, channel });
         await client.ptzDeletePreset(sid, resolved, token);
         return result(json({ device, profile: resolved, token, deleted: true }));
       });

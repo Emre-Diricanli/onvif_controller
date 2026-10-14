@@ -4,41 +4,18 @@
  * can judge exposure, colour, focus and framing before and after a change.
  */
 import { z } from 'zod';
+import { resolveProfile } from '../lib/profiles.js';
 import { defineTool, result, text, image, ToolError } from '../lib/kit.js';
 import { ControllerError } from '../lib/client.js';
 
-/*
- * Which profile to snapshot. An explicit profile wins; a channel resolves via
- * the session's sources (sources[n-1].profiles[0], the main stream of that
- * input); otherwise the first profile that says it supports snapshots. A
- * profile token is not a channel (ADAPTERS.md §2), so channels never map to
- * tokens by number.
- */
-function pickProfile(session, { profile, channel }) {
-  const profiles = session?.profiles ?? [];
-  if (!profiles.length) {
+/** Vendor-only sessions have no media profiles, so nothing to snapshot. */
+function pickProfile(session, args) {
+  if (!(session?.profiles ?? []).length) {
     throw new ToolError('UNSUPPORTED',
       `This device was reached through its ${session?.protocol ?? 'vendor'} API, which has no snapshot support here.`,
       'Snapshots need an ONVIF session. Use read_settings to inspect it, or reconnect with protocol "onvif" if the device speaks ONVIF.');
   }
-  if (profile) {
-    if (!profiles.some((p) => p.token === profile)) {
-      throw new ToolError('NOT_FOUND', `No media profile "${profile}" on this device.`, `Known profiles: ${profiles.map((p) => p.token).join(', ')}.`);
-    }
-    return { token: profile, channel: null };
-  }
-  if (channel !== undefined) {
-    const sources = session?.sources ?? [];
-    const src = sources[channel - 1];
-    const token = src?.profiles?.[0]?.token;
-    if (!token) {
-      throw new ToolError('NOT_FOUND', `No channel ${channel} with a media profile on this device (it has ${sources.length} source(s)).`,
-        'Use list_targets to see the channels.');
-    }
-    return { token, channel };
-  }
-  const first = profiles.find((p) => p.snapshotSupported !== false) ?? profiles[0];
-  return { token: first.token, channel: null };
+  return resolveProfile(session, args, { guessOnMultiChannel: true, preferSnapshot: true });
 }
 
 export const tools = [

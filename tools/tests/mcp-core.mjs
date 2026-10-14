@@ -88,6 +88,25 @@ try {
   await h.close();
 }
 
+t.section('profile resolution on a 4-channel recorder');
+{
+  const r = await startHarness({ mockEnv: { MOCK_CHANNELS: '4' } });
+  try {
+    const snap = await r.call('get_snapshot', { device: 'mock-cam' });
+    t.check('snapshot without a channel defaults to the first stream', !snap.isError && snap.content.some((b) => b.type === 'image'), r.text(snap));
+    const ptz = await r.call('ptz_status', { device: 'mock-cam' });
+    t.check('PTZ refuses to guess which camera on a recorder', ptz.isError === true && /multiple channels/.test(r.text(ptz)), r.text(ptz));
+    const ch3 = await r.call('get_snapshot', { device: 'mock-cam', channel: 3 });
+    t.check('a named channel resolves for snapshots', !ch3.isError, r.text(ch3));
+    const bad = await r.call('get_snapshot', { device: 'mock-cam', channel: 9 });
+    t.check('a channel that does not exist is a clear error', bad.isError === true && /No channel 9/.test(r.text(bad)));
+    const badProfile = await r.call('ptz_status', { device: 'mock-cam', profile: 'nope' });
+    t.check('an unknown profile token is refused before any device call', badProfile.isError === true && /NOT_FOUND/.test(r.text(badProfile)));
+  } finally {
+    await r.close();
+  }
+}
+
 t.section('stdio entry point');
 {
   const child = spawn(process.execPath, ['mcp/index.js'], { cwd: ROOT, env: { ...process.env, ONVIF_CONTROLLER_URL: 'http://127.0.0.1:9' }, stdio: ['pipe', 'pipe', 'pipe'] });
