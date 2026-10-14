@@ -61,15 +61,20 @@ The image pins a known-good Node 20 and **ffmpeg**, which is the setup step that
 fails most often. Nothing else about the app changes.
 
 ```
-npm run up          # or: ./docker/up.sh
+npm run up
 ```
 
-This builds the image, starts it in the background, waits for the healthcheck,
-and prints the address to open:
+(`./docker/up.sh` does the same thing without npm.) It builds the image,
+starts it in the background, waits for the healthcheck, and prints the
+address to open:
 
 ```
   ONVIF Controller is running — open http://127.0.0.1:8080
 ```
+
+If port 8080 is already taken on your machine, it says so before starting. Pick
+another port with `HOST_PORT=8081 npm run up`, or make it permanent with
+`echo HOST_PORT=8081 > .env`.
 
 Plain `docker compose up -d --build` works too, but detached mode shows only
 Compose's own status, so the address is not printed. Use
