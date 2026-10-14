@@ -34,8 +34,15 @@ function run(file) {
   });
 }
 
+// The MCP server is its own package; its tests need `npm install --prefix mcp`.
+const mcpReady = existsSync(path.join(ROOT, 'mcp/node_modules/@modelcontextprotocol/sdk'));
+
 const failed = [];
 for (const file of files) {
+  if (!mcpReady && path.basename(file).startsWith('mcp-')) {
+    console.log(`\n=== ${file}\n  skipped: run \`npm install --prefix mcp\` to test the MCP server`);
+    continue;
+  }
   console.log(`\n=== ${file}`);
   if (!(await run(file))) failed.push(file);
 }

@@ -1,0 +1,17 @@
+{
+  "name": "onvif-controller-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP server that lets an AI agent inspect and adjust cameras and recorders through one or more ONVIF Controller instances.",
+  "engines": { "node": ">=20" },
+  "bin": { "onvif-controller-mcp": "index.js" },
+  "scripts": {
+    "start": "node index.js",
+    "http": "node index.js --http"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "zod": "^4.0.0"
+  }
+}

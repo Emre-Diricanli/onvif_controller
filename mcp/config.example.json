@@ -1,0 +1,20 @@
+{
+  "controllers": [
+    { "name": "local", "url": "http://127.0.0.1:8080" },
+    { "name": "site-a", "url": "https://site-a.example:8443", "token": "env:SITE_A_CONTROLLER_TOKEN" }
+  ],
+  "devices": [
+    {
+      "name": "lobby-cam",
+      "controller": "local",
+      "host": "192.168.1.64",
+      "port": 80,
+      "username": "env:LOBBY_USER",
+      "password": "env:LOBBY_PASS",
+      "protocol": "auto",
+      "label": "Lobby PTZ",
+      "notes": "Faces the west windows; strong glare after 3pm."
+    }
+  ],
+  "defaultController": "local"
+}
