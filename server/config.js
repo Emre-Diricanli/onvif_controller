@@ -21,10 +21,26 @@ const argv = process.argv.slice(2);
 const hostFlagIndex = argv.indexOf('--host');
 const explicitHost = hostFlagIndex !== -1 ? argv[hostFlagIndex + 1] : null;
 
+const port = Number(process.env.PORT ?? 8080);
+const host = explicitHost ?? process.env.HOST ?? '127.0.0.1';
+
+/**
+ * The address an operator should actually open. The bind address is not it:
+ * 0.0.0.0 is not browsable, and inside Docker the container's port is not the
+ * host's (compose publishes 127.0.0.1:${HOST_PORT}), so compose passes the
+ * real one in as PUBLIC_URL.
+ */
+function publicUrl() {
+  if (process.env.PUBLIC_URL) return process.env.PUBLIC_URL;
+  const shown = host === '0.0.0.0' || host === '::' ? 'localhost' : host.includes(':') ? `[${host}]` : host;
+  return `http://${shown}:${port}`;
+}
+
 export const config = {
-  port: Number(process.env.PORT ?? 8080),
+  port,
   /** Loopback by default; exposing the app also exposes camera control. */
-  host: explicitHost ?? process.env.HOST ?? '127.0.0.1',
+  host,
+  publicUrl: publicUrl(),
   ffmpegPath: resolveFfmpeg(),
   onvifTimeoutMs: Number(process.env.ONVIF_TIMEOUT_MS ?? 10000),
   sessionIdleMs: Number(process.env.SESSION_IDLE_MS ?? 30 * 60 * 1000),

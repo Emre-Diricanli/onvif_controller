@@ -210,7 +210,7 @@ const fanoutReady = ensureTargetsLoaded().catch((err) => {
 
 server.listen(config.port, config.host, () => {
   warnIfExposed();
-  console.log(`ONVIF Controller  →  http://${config.host}:${config.port}`);
+  console.log(`ONVIF Controller listening on ${config.host}:${config.port}`);
   if (!config.ffmpegPath) {
     console.warn('  ffmpeg not found on PATH — live streaming will fall back to snapshot polling.');
   } else {
@@ -229,6 +229,8 @@ server.listen(config.port, config.host, () => {
       console.warn('  fan-out: FANOUT_CONFIG is set but no usable targets were loaded.');
     }
     for (const error of errors) console.warn(`  fan-out: ${error}`);
+    // Last line of startup, so it is what sits at the bottom of the log.
+    console.log(`\n  Ready — open ${config.publicUrl}\n`);
   });
 });
 

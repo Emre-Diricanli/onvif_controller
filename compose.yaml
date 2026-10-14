@@ -16,6 +16,9 @@ services:
       # expected and safe ONLY because of the loopback publish address above.
       HOST: 0.0.0.0
       PORT: 8080
+      # What the startup log tells you to open. The container cannot see the
+      # host-side port, so it is passed in; keep it in step with `ports` above.
+      PUBLIC_URL: http://127.0.0.1:${HOST_PORT:-8080}
       # Optional overrides — set these in a local .env (never committed) to
       # change them without editing this file. Defaults mirror server/config.js.
       ONVIF_TIMEOUT_MS: ${ONVIF_TIMEOUT_MS:-10000}
