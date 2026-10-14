@@ -66,9 +66,17 @@ npm start
 Open http://localhost:8080, enter the camera's IP, port (usually 80), and the
 ONVIF username and password.
 
-The server binds `127.0.0.1` by default. It has no authentication of its own —
-anything that can reach the port can pan the camera and reboot it — so exposing
-it requires an explicit `--host 0.0.0.0`, which prints a warning.
+The server binds `127.0.0.1` by default. Out of the box it has no
+authentication — anything that can reach the port can pan the camera and
+reboot it — so exposing it requires an explicit `--host 0.0.0.0`, which prints
+a warning.
+
+**For remote access**, set `CONTROLLER_TOKEN` to a long random secret. Every
+`/api` and `/ws` request then needs `Authorization: Bearer <token>`. In a
+browser, open `http://host:port/?token=<token>` once: it sets a session cookie
+and drops the token from the address bar. Prefer an SSH tunnel, or put HTTPS
+in front: the token does not encrypt traffic. Details are in API.md
+"Authentication".
 
 ## Run with Docker
 
@@ -99,8 +107,9 @@ in the foreground, where it is the last startup line.
 Open http://127.0.0.1:8080. If 8080 is taken, pick another host port with
 `HOST_PORT=8081 docker compose up` — it stays bound to `127.0.0.1`.
 
-**The published address is the security boundary.** The app has no
-authentication of its own, so `compose.yaml` publishes to `127.0.0.1` only:
+**The published address is the security boundary.** Unless you set
+`CONTROLLER_TOKEN` (see above), the app has no authentication, so
+`compose.yaml` publishes to `127.0.0.1` only:
 
 ```yaml
 ports: ["127.0.0.1:8080:8080"]   # correct

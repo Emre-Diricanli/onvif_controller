@@ -70,9 +70,15 @@ The agent can still open any camera by address with `connect_device`.
   agent never sees credentials: it refers to devices by name.
 - **`notes`** on a device are shown to the agent. Put site knowledge there
   ("faces west windows, glare after 3pm").
-- **Remote controllers:** give each one a `token` (`"env:SITE_A_TOKEN"`) and
-  start that controller with the same `CONTROLLER_TOKEN`. Prefer an SSH
-  tunnel to its loopback port, or HTTPS through a reverse proxy.
+- **Remote controllers:** start the remote controller with
+  `CONTROLLER_TOKEN=<secret>`, and give its entry here `"token":
+  "env:SITE_A_TOKEN"` holding the same secret. Prefer an SSH tunnel to its
+  loopback port (`ssh -L 18080:127.0.0.1:8080 site-a`, then
+  `"url": "http://127.0.0.1:18080"`), or HTTPS through a reverse proxy. A
+  wrong or missing token shows up as `CONTROLLER_UNAUTHORIZED`.
+- **`allowHosts`** on a controller (`["192.168.10.0/24", "nvr.site-a.lan"]`)
+  limits which addresses the agent may open with `connect_device`. Saved
+  devices are always allowed. An empty list means saved devices only.
 
 ## Safety
 

@@ -1,7 +1,18 @@
 {
   "controllers": [
-    { "name": "local", "url": "http://127.0.0.1:8080" },
-    { "name": "site-a", "url": "https://site-a.example:8443", "token": "env:SITE_A_CONTROLLER_TOKEN" }
+    {
+      "name": "local",
+      "url": "http://127.0.0.1:8080"
+    },
+    {
+      "name": "site-a",
+      "url": "https://site-a.example:8443",
+      "token": "env:SITE_A_CONTROLLER_TOKEN",
+      "allowHosts": [
+        "10.20.0.0/16",
+        "nvr.site-a.lan"
+      ]
+    }
   ],
   "devices": [
     {
