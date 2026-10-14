@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "onvif-controller": {
+      "command": "node",
+      "args": ["mcp/index.js"],
+      "env": {
+        "ONVIF_CONTROLLER_URL": "${ONVIF_CONTROLLER_URL:-http://127.0.0.1:8080}"
+      }
+    }
+  }
+}

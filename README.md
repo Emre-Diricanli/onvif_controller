@@ -36,6 +36,21 @@ on hardware. `node tools/probe-dahua.mjs` and `tools/probe-isapi.mjs` are
 read-only tools for checking a real unit. To add a vendor, see
 `ADAPTERS.md`.
 
+## Let an AI agent drive it (MCP)
+
+`mcp/` is a Model Context Protocol server. Point Claude Code, Claude Desktop,
+or any MCP client at a camera and it can see snapshots, read and change
+settings with verified results, and drive PTZ, on local or remote
+controllers. Disruptive actions always need your confirmation.
+
+```
+npm install --prefix mcp
+claude            # this repo ships .mcp.json; approve "onvif-controller"
+```
+
+See [`mcp/README.md`](mcp/README.md) for remote controllers, saved devices
+and the tool list.
+
 ## Requirements
 
 - Node.js 20 or newer
@@ -226,4 +241,5 @@ real cases this app now handles explicitly rather than failing confusingly:
 - `SPEC.md` — product and design contract, including the motion system
 - `API.md` — the HTTP and WebSocket wire protocol
 - `ADAPTERS.md` — the device-adapter contract: settings model, verified writes, transport rules
+- `MCP.md` — the MCP server contract: tools, safety gates, sessions, remote auth
 - `INTERNAL.md` — module boundaries and import signatures
