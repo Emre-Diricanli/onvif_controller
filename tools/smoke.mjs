@@ -14,8 +14,10 @@ import WsClient from 'ws';
 import path from 'node:path';
 import { describeProfiles, PROFILE_DESCRIPTION_CONCURRENCY } from '../server/onvif/media.js';
 
-const MOCK_PORT = 10199;
-const APP_PORT = 8099;
+// Overridable so two checkouts (git worktrees) can run the suite at once;
+// every other port in this file is derived from these two.
+const MOCK_PORT = Number(process.env.SMOKE_MOCK_PORT ?? 10199);
+const APP_PORT = Number(process.env.SMOKE_APP_PORT ?? 8099);
 const BASE = `http://127.0.0.1:${APP_PORT}`;
 
 let passed = 0;
@@ -62,6 +64,18 @@ function cleanup() {
 }
 process.on('exit', cleanup);
 process.on('SIGINT', () => { cleanup(); process.exit(130); });
+
+/**
+ * Keep only ffmpeg processes this checkout started. The shim is spawned by its
+ * absolute path, so another worktree running the suite at the same moment
+ * (its own shim, its own path) is not mistaken for an orphan of this run.
+ */
+const FAKE_FFMPEG = path.resolve('tools/fake-ffmpeg.mjs');
+function ownFfmpeg(pgrepOutput) {
+  return String(pgrepOutput).split('\n')
+    .filter((line) => line.includes(FAKE_FFMPEG) || (process.env.SMOKE_REAL_FFMPEG && /rtsp:/.test(line)))
+    .join('\n').trim();
+}
 
 async function readNdjson(response) {
   const events = [];
@@ -1133,7 +1147,7 @@ async function main() {
         const { execSync } = await import('node:child_process');
         // Match only this run's shim, never an unrelated ffmpeg the operator
         // has streaming from a real camera on the same machine.
-        alive = execSync('pgrep -fl "fake-ffmpeg" || true', { encoding: 'utf8' }).trim();
+        alive = ownFfmpeg(execSync('pgrep -fl "fake-ffmpeg" || true', { encoding: 'utf8' }));
       } catch { /* nothing matched */ }
       check('stopping the stream kills its ffmpeg', alive === '', alive.slice(0, 200));
     }
@@ -1646,7 +1660,7 @@ async function main() {
   try {
     // Scoped to the mock's own RTSP endpoint: a real camera stream running in
     // another process on this machine is not this test's business.
-    orphans = execSync(`pgrep -fl "fake-ffmpeg|rtsp://[^ ]*127.0.0.1:8554" || true`, { encoding: 'utf8' }).trim();
+    orphans = ownFfmpeg(execSync(`pgrep -fl "fake-ffmpeg|rtsp://[^ ]*127.0.0.1:8554" || true`, { encoding: 'utf8' }));
   } catch { /* pgrep exits 1 when nothing matches */ }
   check('no orphaned ffmpeg processes', orphans === '', orphans.slice(0, 200));
 

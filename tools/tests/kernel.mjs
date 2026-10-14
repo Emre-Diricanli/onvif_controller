@@ -59,10 +59,11 @@ async function bootApp(port, env = {}) {
 }
 
 // ------------------------------------------------------------------ ONVIF
-const MOCK = 10301;
+const MOCK = Number(process.env.KERNEL_MOCK_PORT ?? 10301);
+const APP = Number(process.env.KERNEL_APP_PORT ?? 8301);
 start(['tools/mock-camera.js', String(MOCK)]);
 start(['tools/mock-camera.js', String(MOCK + 1)], { MOCK_IMAGING_MODE: 'ignore' });
-const base = await bootApp(8301);
+const base = await bootApp(APP);
 t.check('app started', Boolean(base));
 
 const adaptersRes = await api(base, 'GET', '/api/adapters');
@@ -169,7 +170,7 @@ if (!single) {
   console.log('  (no single-camera vendor persona installed — fallback check skipped)');
 } else {
   const dev = await startPersona(single, { username: 'admin', password: 'admin' });
-  const fbBase = await bootApp(8302, { VENDOR_HTTP_PORT: String(dev.port) });
+  const fbBase = await bootApp(APP + 1, { VENDOR_HTTP_PORT: String(dev.port) });
   try {
     const c = await api(fbBase, 'POST', '/api/connect', { host: '127.0.0.1', port: MOCK + 1, username: 'admin', password: 'admin' });
     const fsid = c.json?.sessionId;
