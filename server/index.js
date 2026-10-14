@@ -5,6 +5,7 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 
 import { config, warnIfExposed } from './config.js';
+import { createAuth } from './auth.js';
 import { errorMiddleware, AppError } from './errors.js';
 import { getSession, shutdownAllSessions, onSessionDestroyed, onSessionCreated } from './sessions.js';
 import sessionRoutes from './routes/session.js';
@@ -42,6 +43,8 @@ function isSameOrigin(req) {
 
 const app = express();
 app.disable('x-powered-by');
+const auth = createAuth(config.controllerToken);
+app.use(auth.middleware);
 app.use(express.json({ limit: '64kb' }));
 
 // The app proxies camera control with no auth of its own, so keep it same-origin.
@@ -108,6 +111,8 @@ server.on('upgrade', (req, socket, head) => {
     socket.destroy();
     return;
   }
+
+  if (!auth.upgrade(req, socket)) return;
 
   if (!isSameOrigin(req)) {
     socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');

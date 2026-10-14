@@ -2,39 +2,22 @@
  * The tool context: controllers, configured devices, and device sessions
  * (MCP.md §4, §6).
  *
- * Step-0 reference implementation. The exported interface is frozen; Stream 2
- * owns hardening (config validation, host allowlists, session health checks,
- * concurrency on first connect).
+ * Concurrent callers share a connection; only expired sessions are retried.
  */
-import { readFileSync, existsSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { ControllerClient, ControllerError } from './client.js';
-import { ToolError } from './kit.js';
+import { ToolError, scrub } from './kit.js';
+import { loadConfig, validateConfig, configWarnings, hostAllowed, normalizeHost } from './config.js';
 
-const MCP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-
-/** "env:NAME" -> process.env.NAME; anything else unchanged. */
-function resolveSecret(value) {
-  if (typeof value === 'string' && value.startsWith('env:')) return process.env[value.slice(4)] ?? null;
-  return value;
-}
-
-export function loadConfig(file = process.env.ONVIF_MCP_CONFIG ?? path.join(MCP_DIR, 'config.json')) {
-  if (!existsSync(file)) {
-    return {
-      controllers: [{ name: 'local', url: process.env.ONVIF_CONTROLLER_URL ?? 'http://127.0.0.1:8080' }],
-      devices: [],
-      defaultController: 'local',
-    };
-  }
-  return JSON.parse(readFileSync(file, 'utf8'));
-}
+export { loadConfig } from './config.js';
 
 export function createContext(config = loadConfig(), { log = (level, msg) => process.stderr.write(`[mcp ${level}] ${msg}\n`) } = {}) {
+  config = validateConfig(config);
+  const output = log;
+  log = (level, msg) => output(level, scrub(msg));
+  for (const warning of configWarnings(config)) log('warn', warning);
   const controllers = new Map();
   for (const c of config.controllers ?? []) {
-    controllers.set(c.name, new ControllerClient({ name: c.name, url: resolveSecret(c.url), token: resolveSecret(c.token) ?? null, timeoutMs: c.timeoutMs }));
+    controllers.set(c.name, new ControllerClient({ name: c.name, url: c.url, token: c.token ?? null, timeoutMs: c.timeoutMs }));
   }
   const defaultController = config.defaultController ?? config.controllers?.[0]?.name;
 
@@ -45,11 +28,19 @@ export function createContext(config = loadConfig(), { log = (level, msg) => pro
       name: d.name, controller: d.controller ?? defaultController, host: d.host,
       port: d.port ?? 80, protocol: d.protocol ?? 'auto', label: d.label ?? null, notes: d.notes ?? null,
     });
-    secrets.set(d.name, { username: resolveSecret(d.username) ?? '', password: resolveSecret(d.password) ?? '' });
+    secrets.set(d.name, { username: d.username ?? '', password: d.password ?? '' });
   }
 
   const live = new Map();      // ref -> { sessionId, session }
+  const opening = new Map();
+  const disconnecting = new Map();
+  let closed = false;
+  let closePromise;
   let adhocCounter = 0;
+
+  function assertOpen() {
+    if (closed) throw new ToolError('CONTEXT_CLOSED', 'The controller context is closed.');
+  }
 
   function controllerFor(name) {
     const client = controllers.get(name ?? defaultController);
@@ -66,16 +57,28 @@ export function createContext(config = loadConfig(), { log = (level, msg) => pro
     return device;
   }
 
-  async function open(ref) {
+  function open(ref) {
+    assertOpen();
+    if (disconnecting.has(ref)) throw new ToolError('SESSION_CLOSING', 'The device is disconnecting.');
+    if (live.has(ref)) return Promise.resolve(live.get(ref));
+    if (opening.has(ref)) return opening.get(ref);
     const device = deviceFor(ref);
     const client = controllerFor(device.controller);
     const creds = secrets.get(ref) ?? {};
-    const session = await client.connect({ host: device.host, port: device.port, protocol: device.protocol, ...creds });
-    live.set(ref, { sessionId: session.sessionId, session });
-    return live.get(ref);
+    const pending = (async () => {
+      const session = await client.connect({ host: device.host, port: device.port, protocol: device.protocol, ...creds });
+      if (!session?.sessionId) throw new ControllerError('CONTROLLER_INVALID_RESPONSE', 'Controller returned no session ID.');
+      const state = { sessionId: session.sessionId, session };
+      live.set(ref, state);
+      return state;
+    })().finally(() => opening.delete(ref));
+    opening.set(ref, pending);
+    return pending;
   }
 
   async function use(ref, fn) {
+    assertOpen();
+    if (disconnecting.has(ref)) throw new ToolError('SESSION_CLOSING', 'The device is disconnecting.');
     const device = deviceFor(ref);
     const client = controllerFor(device.controller);
     let state = live.get(ref) ?? await open(ref);
@@ -84,15 +87,21 @@ export function createContext(config = loadConfig(), { log = (level, msg) => pro
     } catch (err) {
       // Only an expired controller session is retried: the request never ran.
       if (!(err instanceof ControllerError) || err.code !== 'SESSION_EXPIRED') throw err;
-      live.delete(ref);
+      if (live.get(ref) === state) live.delete(ref);
       state = await open(ref);
       return fn(client, state.sessionId, { ref, controller: client.name, device, session: state.session });
     }
   }
 
   async function connect({ controller, host, port = 80, username = '', password = '', protocol = 'auto', label = null }) {
-    const ref = `adhoc-${++adhocCounter}`;
+    assertOpen();
     const ctrl = controllerFor(controller);
+    const policy = config.controllers.find((c) => c.name === ctrl.name).allowHosts;
+    if (!hostAllowed(host, policy)) throw new ToolError('HOST_NOT_ALLOWED', 'The device host is not allowed by this controller configuration.');
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new ToolError('BAD_REQUEST', 'Device port must be an integer from 1 to 65535.');
+    host = normalizeHost(host);
+    let ref;
+    do { ref = `adhoc-${++adhocCounter}`; } while (devices.has(ref));
     devices.set(ref, { name: ref, controller: ctrl.name, host, port, protocol, label, notes: null, adhoc: true });
     secrets.set(ref, { username, password });
     try {
@@ -106,13 +115,20 @@ export function createContext(config = loadConfig(), { log = (level, msg) => pro
   }
 
   async function disconnect(ref) {
+    if (disconnecting.has(ref)) return disconnecting.get(ref);
     const device = deviceFor(ref);
-    const state = live.get(ref);
-    live.delete(ref);
-    if (state) {
-      try { await controllerFor(device.controller).disconnect(state.sessionId); } catch { /* already gone */ }
-    }
-    if (device.adhoc) { devices.delete(ref); secrets.delete(ref); }
+    const pending = (async () => {
+      /** Await first-use connects so shutdown cannot orphan a late session. */
+      await opening.get(ref)?.catch(() => {});
+      const state = live.get(ref);
+      live.delete(ref);
+      if (state) {
+        try { await controllerFor(device.controller).disconnect(state.sessionId); } catch { /* already gone */ }
+      }
+      if (device.adhoc) { devices.delete(ref); secrets.delete(ref); }
+    })().finally(() => disconnecting.delete(ref));
+    disconnecting.set(ref, pending);
+    return pending;
   }
 
   function list() {
@@ -120,7 +136,7 @@ export function createContext(config = loadConfig(), { log = (level, msg) => pro
       const state = live.get(d.name);
       return {
         ref: d.name, controller: d.controller, host: d.host, port: d.port, label: d.label,
-        connected: Boolean(state), protocol: state?.session?.protocol ?? null,
+        adhoc: Boolean(d.adhoc), connected: Boolean(state), protocol: state?.session?.protocol ?? null,
         model: state?.session?.device?.model ?? null,
       };
     });
@@ -134,8 +150,15 @@ export function createContext(config = loadConfig(), { log = (level, msg) => pro
     controllerFor,
     sessions: { use, connect, disconnect, list },
     log,
-    async close() {
-      for (const ref of [...live.keys()]) await disconnect(ref).catch(() => {});
+    close() {
+      if (closePromise) return closePromise;
+      closed = true;
+      closePromise = (async () => {
+        await Promise.allSettled([...opening.values()]);
+        await Promise.allSettled([...devices.keys()].map((ref) => disconnect(ref)));
+        secrets.clear();
+      })();
+      return closePromise;
     },
   };
 }

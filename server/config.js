@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { isIP } from 'node:net';
 import { AppError } from './errors.js';
 import { existsSync } from 'node:fs';
 
@@ -38,6 +39,7 @@ function publicUrl() {
 
 export const config = {
   port,
+  controllerToken: process.env.CONTROLLER_TOKEN || null,
   /** Loopback by default; exposing the app also exposes camera control. */
   host,
   publicUrl: publicUrl(),
@@ -60,11 +62,12 @@ export function assertFfmpeg() {
 }
 
 export function warnIfExposed() {
-  if (config.host !== '127.0.0.1' && config.host !== 'localhost') {
+  if (!config.controllerToken && !['localhost', '::1'].includes(config.host) && !(isIP(config.host) === 4 && config.host.startsWith('127.'))) {
     console.warn(
       `\n  WARNING: binding ${config.host} exposes full camera control (PTZ, reboot,\n` +
       '  relay outputs) to anyone who can reach this port. There is no app-level\n' +
-      '  authentication. Only do this on a trusted management network.\n',
+      '  authentication unless CONTROLLER_TOKEN is set. Use an SSH tunnel or a token\n' +
+      '  with HTTPS via a reverse proxy for remote access.\n',
     );
   }
 }
