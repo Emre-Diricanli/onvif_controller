@@ -1,6 +1,12 @@
 import { isKeyframeFragment } from './fmp4.js';
 
 /**
+ * Prefer the pipeline's verdict (it can see the moov's trex default flags);
+ * fall back to parsing the fragment when it is absent.
+ */
+const startsWithKeyframe = (buffer) => (typeof buffer?.keyframe === 'boolean' ? buffer.keyframe : isKeyframeFragment(buffer));
+
+/**
  * Send-queue depth at which the relay starts dropping. The 4K cameras this
  * app runs against push ~6000 kbps ≈ 0.75 MB/s, so 1 MiB of bufferedAmount is
  * already ~1.3s of queued video — latency the viewer can see. The previous
@@ -60,7 +66,7 @@ export function handleStreamSocket(ws, url, ctx) {
    */
   const primeFromGopCache = () => {
     const cache = handle.gopCache;
-    if (!Array.isArray(cache) || cache.length === 0 || !isKeyframeFragment(cache[0])) return false;
+    if (!Array.isArray(cache) || cache.length === 0 || !startsWithKeyframe(cache[0])) return false;
     for (const fragment of cache) sendBinary(fragment);
     return true;
   };
@@ -76,7 +82,7 @@ export function handleStreamSocket(ws, url, ctx) {
     if (ws.readyState !== 1) return;
     if (!skipping && ws.bufferedAmount > BACKPRESSURE_BYTES) skipping = true;
     if (skipping) {
-      if (!isKeyframeFragment(data)) {
+      if (!startsWithKeyframe(data)) {
         droppedFrames += 1;
         return;
       }

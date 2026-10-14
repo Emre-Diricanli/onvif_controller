@@ -313,6 +313,10 @@ export class StreamHandle extends EventEmitter {
         } else if (box.type === 'mdat' && this.pendingMoof) {
           const fragment = Buffer.concat([this.pendingMoof, data]);
           const keyframe = firstSampleIsKeyframe(this.pendingMoof, this.defaultSampleFlags);
+          // Carry the verdict on the buffer itself (additive; the event shape is
+          // unchanged). Only the pipeline sees the moov's trex defaults, so the
+          // relay should trust this over re-parsing the fragment alone.
+          fragment.keyframe = keyframe;
           this.pendingMoof = null;
           if (keyframe) {
             this.gopCache = [];
