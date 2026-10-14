@@ -9,15 +9,34 @@
  *
  * A hook answers by returning true. Unknown names fail loudly — a typo must
  * not silently run the wrong device.
+ *
+ * Personas are discovered from this directory (ADAPTERS.md §8): every module
+ * exporting `persona` is registered under `persona.name`, so adding one never
+ * means editing this file.
  */
-import { persona as ipm32r32p } from './ipm32r32p.js';
-import { persona as rst08 } from './rst08.js';
-import { persona as ar504 } from './ar504.js';
-import { persona as nr520 } from './nr520.js';
-import { persona as dahuaXvr } from './dahua-xvr.js';
-import { persona as vatilon } from './vatilon.js';
+import { readdirSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const PERSONAS = { ipm32r32p, rst08, ar504, nr520, 'dahua-xvr': dahuaXvr, vatilon };
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+async function discover() {
+  const found = {};
+  for (const file of readdirSync(HERE).sort()) {
+    if (!file.endsWith('.js') || file === 'index.js') continue;
+    const mod = await import(pathToFileURL(path.join(HERE, file)).href);
+    if (!mod.persona?.name) continue;
+    if (found[mod.persona.name]) throw new Error(`Duplicate persona name "${mod.persona.name}" in ${file}`);
+    found[mod.persona.name] = mod.persona;
+  }
+  return found;
+}
+
+const PERSONAS = await discover();
+
+export function listPersonas() {
+  return { ...PERSONAS };
+}
 
 export function loadPersona(name) {
   const persona = PERSONAS[name];

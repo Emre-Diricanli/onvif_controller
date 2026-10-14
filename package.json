@@ -8,7 +8,7 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
-    "test": "node tools/smoke.mjs"
+    "test": "node tools/run-tests.mjs"
   },
   "dependencies": {
     "express": "^4.19.2",
