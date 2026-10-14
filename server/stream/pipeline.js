@@ -3,6 +3,14 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { config } from '../config.js';
 import { AppError } from '../errors.js';
+import { redactUri } from '../onvif/util.js';
+
+const STDERR_TAIL_LINES = 12;
+
+/** ffmpeg echoes the input URL, credentials included. Never let that reach a log. */
+function scrubCredentials(text) {
+  return String(text).replace(/(rtsps?|https?):\/\/[^\s/@]*@/gi, '$1://***@');
+}
 
 const streams = new Map();
 const children = new Set();
@@ -95,6 +103,9 @@ class StreamHandle extends EventEmitter {
     this.restartTimer = null;
     this.orphanTimer = null;
     this.failures = [];
+    // The last lines ffmpeg wrote, kept so a failure can say WHY. Without this
+    // a dead stream logs nothing and the only symptom is "degraded".
+    this.stderrTail = [];
     this.parserBuffer = Buffer.alloc(0);
     this.initBoxes = [];
     this.pendingMoof = null;
@@ -203,6 +214,12 @@ class StreamHandle extends EventEmitter {
   }
 
   consumeStats(text) {
+    for (const line of text.split(/\r?\n|\r/)) {
+      // Progress lines ("frame= … fps= …") are noise for diagnosis.
+      if (!line.trim() || /^frame=|^\s*size=/.test(line)) continue;
+      this.stderrTail.push(scrubCredentials(line).slice(0, 300));
+      if (this.stderrTail.length > STDERR_TAIL_LINES) this.stderrTail.shift();
+    }
     const fpsMatches = [...text.matchAll(/fps=\s*([\d.]+)/g)];
     const bitrateMatches = [...text.matchAll(/bitrate=\s*([\d.]+)kbits\/s/g)];
     if (fpsMatches.length) this.stats.fps = Number(fpsMatches.at(-1)[1]);
@@ -214,7 +231,19 @@ class StreamHandle extends EventEmitter {
     }
   }
 
+  describe() {
+    const v = this.profile.video ?? {};
+    return `${redactUri(this.profile.rtspUri) ?? '(no uri)'} [${this.profile.token}: ${v.codec ?? '?'} ${v.width ?? '?'}x${v.height ?? '?'}@${v.fps ?? '?'}]`;
+  }
+
+  logExit(code, signal) {
+    console.warn(`[stream] ffmpeg exited (${code !== null ? `code ${code}` : signal ?? 'unknown'}) for ${this.describe()}`
+      + `${this.initSegment ? '' : ' before producing an init segment'}; last output:\n`
+      + (this.stderrTail.length ? this.stderrTail.map((l) => `    ${l}`).join('\n') : '    (none)'));
+  }
+
   onUnexpectedExit(code, signal) {
+    this.logExit(code, signal);
     const now = Date.now();
     this.failures = this.failures.filter((time) => now - time < FAILURE_WINDOW_MS);
     this.failures.push(now);
@@ -264,7 +293,11 @@ export async function startStream(session, profileToken) {
   streams.set(handle.streamId, handle);
 
   const ready = new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => rejectStream('Timed out waiting for ffmpeg to initialize the stream.'), 15_000);
+    const timeout = setTimeout(() => {
+      console.warn(`[stream] no init segment within 15s for ${handle.describe()}; last output:\n`
+        + (handle.stderrTail.length ? handle.stderrTail.map((l) => `    ${l}`).join('\n') : '    (none)'));
+      rejectStream('Timed out waiting for ffmpeg to initialize the stream.');
+    }, 15_000);
     timeout.unref?.();
     const cleanup = () => {
       clearTimeout(timeout);
