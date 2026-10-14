@@ -530,6 +530,15 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+    // Writes whose fixture is unusable (SetSystemDateAndTime.xml is a raw
+    // template) or missing (SetRelayOutputState): a real device answers with
+    // an empty <Op>Response, so the time-sync and relay paths can succeed.
+    if (op === 'SetSystemDateAndTime' || op === 'SetRelayOutputState') {
+      res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
+      res.end(networkResponse(op, ''));
+      return;
+    }
+
 if (op === 'GetVideoEncoderConfigurationOptions') {
       const profileToken = (body.match(/<[^>]*ProfileToken[^>]*>([^<]*)</) ?? [])[1];
       res.writeHead(200, { 'Content-Type': 'application/soap+xml' });
