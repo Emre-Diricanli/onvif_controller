@@ -1,31 +1,54 @@
 /**
- * Per-(device, resource) mutual exclusion for read-modify-write (ADAPTERS.md §7).
- *
- * The governor bounds how many requests a device sees; it does not stop two
- * sessions each reading the same config object and overwriting the other's
- * change. This does. It is deliberately NOT a governor slot: hold the lock
- * while awaiting governed requests, never the reverse, or the two deadlock.
- *
- * Step-0 reference implementation; the transport stream owns hardening
- * (wait deadlines, stats).
+ * Per-resource mutual exclusion protects read-modify-write across sessions.
+ * Hold this lock while awaiting governed requests, never the reverse: a lock
+ * does not consume a governor slot while another writer finishes its work.
  */
-const tails = new Map();
+import { AppError } from '../errors.js';
+
+const locks = new Map();
 
 export function lockKey(host, port, resource) {
   return `${String(host).toLowerCase()}:${port ?? ''}|${resource}`;
 }
 
-export async function withResourceLock(key, fn) {
-  const previous = tails.get(key) ?? Promise.resolve();
-  let release;
-  const mine = new Promise((resolve) => { release = resolve; });
-  const tail = previous.then(() => mine);
-  tails.set(key, tail);
-  await previous;
+/** Snapshot only; callers cannot mutate live queues. Keys may contain resources. */
+export function lockStats() {
+  return [...locks].map(([key, lock]) => ({ key, active: true, queued: lock.queue.length }));
+}
+
+export async function withResourceLock(key, fn, { waitMs } = {}) {
+  if (waitMs !== undefined && (!Number.isFinite(waitMs) || waitMs < 0 || waitMs > 0x7fffffff)) {
+    throw new AppError('BAD_REQUEST', 'The resource lock wait deadline is invalid.');
+  }
+  let lock = locks.get(key);
+  if (!lock) {
+    lock = { queue: [] };
+    locks.set(key, lock);
+  } else {
+    await new Promise((resolve, reject) => {
+      const waiter = { resolve, timer: null, expiresAt: waitMs === undefined ? Infinity : Date.now() + waitMs };
+      const expire = () => {
+        const index = lock.queue.indexOf(waiter);
+        if (index !== -1) lock.queue.splice(index, 1);
+        reject(new AppError('DEVICE_BUSY', 'The device resource is busy; its lock wait deadline was exceeded.'));
+      };
+      waiter.expire = expire;
+      lock.queue.push(waiter);
+      if (waitMs !== undefined) waiter.timer = setTimeout(expire, waitMs);
+    });
+  }
   try {
     return await fn();
   } finally {
-    release();
-    if (tails.get(key) === tail) tails.delete(key);
+    // Timed-out waiters are removed immediately, even if the owner never ends.
+    // Check time here too: a busy event loop may delay a deadline's timer.
+    let next;
+    while ((next = lock.queue.shift())) {
+      clearTimeout(next.timer);
+      if (next.expiresAt <= Date.now()) { next.expire(); continue; }
+      next.resolve();
+      break;
+    }
+    if (!next) locks.delete(key);
   }
 }
